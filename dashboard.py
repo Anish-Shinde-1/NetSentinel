@@ -114,7 +114,6 @@ def integrated_dashboard():
                 ("🔍", "5. Search/Filter Rules"),
                 ("🚀", "6. Apply Firewall Rules"),
                 ("🧹", "7. Clear All Firewall Rules"),
-                ("📡", f"8. Toggle Sniffing ({'ON' if sniffing_active else 'OFF'})"),
                 ("🚪", "0. Exit Dashboard")
             ]
             

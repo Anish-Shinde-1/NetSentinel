@@ -53,8 +53,3 @@ NetSentinel is a Python-based tool we built as a group project during the fourth
 - `utils.py`: Helper functions for packet processing.
 - `admin.py`: Checks for admin privileges.
 - `config.py`: Sets up logging and global variables.
-
-
-## Acknowledgments
-
-We learned a lot from online resources, tutorials, and our college coursework while building this. Thanks to the Python community and library developers for making this project possible.
