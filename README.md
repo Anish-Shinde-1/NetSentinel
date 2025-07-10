@@ -32,7 +32,6 @@ NetSentinel is a Python-based tool we built as a group project during the fourth
    - `5`: Search rules
    - `6`: Apply rules
    - `7`: Clear all rules
-   - `8`: Toggle packet sniffing
    - `0`: Exit
 
 
