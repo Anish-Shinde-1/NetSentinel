@@ -1,0 +1,29 @@
+# Python compiled files
+__pycache__/
+*.pyc
+
+# Generated output files
+firewall.log
+rules.json
+
+# Reference and documentation files (not part of the codebase)
+NetSentinel Ref/
+*.pdf
+*.pptx
+*.docx
+
+# Local development environment
+.venv/
+venv/
+*.env
+
+# Editor and OS-specific files
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Python virtual environment and package lock files
+pipenv/
+poetry.lock
