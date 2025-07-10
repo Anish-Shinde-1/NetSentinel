@@ -35,9 +35,6 @@ NetSentinel is a Python-based tool we built as a group project during the fourth
    - `8`: Toggle packet sniffing
    - `0`: Exit
 
-## Project Notes
-
-This project was a collaborative effort by our group in semester 4 to learn about Python, networking, and Windows firewall mechanics. It uses libraries like `scapy` for packet sniffing, `psutil` for process mapping, and `rich` for a clean terminal interface. It’s a work in progress, built for educational purposes rather than as a professional firewall. Feedback is welcome to help us improve!
 
 ## Requirements
 
