@@ -4,6 +4,8 @@ NetSentinel is a Python-based utility designed to explore Windows firewall manag
 
 It provides an interactive dashboard to monitor live network packets and a command-line interface to dynamically inject blocking rules into the Windows Defender Firewall.
 
+![NetSentinel Dashboard](assets/dashboard.png)
+
 ## Features
 
 - **Application-Layer Firewall Management**: Add, edit, remove, or search rules to block specific `.exe` applications, IPs, or ports using Windows Defender Firewall via PowerShell.
