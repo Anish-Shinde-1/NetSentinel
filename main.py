@@ -1,52 +1,86 @@
-#main.py
+import argparse
 import sys
-from admin import is_admin
-from rule_engine import list_rules, add_rule, remove_rule_interactive, edit_rule, search_filter_rules
-from firewall import apply_firewall_rules, clear_firewall_rules
-from dashboard import integrated_dashboard
+from rich.prompt import Prompt
+
+from utils.admin import is_admin
 from config import console
+from ui.dashboard import integrated_dashboard
+from ui.prompts import (
+    list_rules,
+    add_rule,
+    remove_rule_interactive,
+    edit_rule,
+    search_filter_rules,
+)
+from security.firewall import apply_firewall_rules, clear_firewall_rules
 
-if not is_admin():
-    console.print("[bold red]ERROR: Requires administrator privileges[/bold red]")
-    sys.exit(1)
 
-if __name__ == "__main__":
-    if "--sniffer" in sys.argv:
-        from scapy.all import sniff
-        import time
-        console.print("[bold cyan]Starting packet sniffing... Press Ctrl+C to stop.[/bold cyan]")
-        try:
-            sniff(filter="ip or arp", prn=lambda pkt: console.print(f"{time.strftime('%H:%M:%S')} | {pkt.summary()}"), store=False)
-        except KeyboardInterrupt:
-            console.print("[bold red]Packet sniffing stopped.[/bold red]")
-    elif "--list" in sys.argv:
+def run_sniffer():
+    from scapy.all import sniff
+    import time
+
+    console.print(
+        "[bold cyan]Starting packet sniffing... Press Ctrl+C to stop.[/bold cyan]"
+    )
+    try:
+        sniff(
+            filter="ip or arp",
+            prn=lambda pkt: console.print(
+                f"{time.strftime('%H:%M:%S')} | {pkt.summary()}"
+            ),
+            store=False,
+        )
+    except KeyboardInterrupt:
+        console.print("[bold red]Packet sniffing stopped.[/bold red]")
+
+
+def main():
+    if not is_admin():
+        console.print("[bold red]ERROR: Requires administrator privileges[/bold red]")
+        sys.exit(1)
+
+    parser = argparse.ArgumentParser(
+        description="NetSentinel v1.0 - Network Monitor & Firewall Manager"
+    )
+    parser.add_argument(
+        "--sniffer", action="store_true", help="Start standalone packet sniffing"
+    )
+    parser.add_argument("--list", action="store_true", help="List firewall rules")
+    parser.add_argument("--add", action="store_true", help="Add firewall rule")
+    parser.add_argument("--remove", action="store_true", help="Remove firewall rule")
+    parser.add_argument("--edit", action="store_true", help="Edit firewall rule")
+    parser.add_argument(
+        "--search", action="store_true", help="Search/filter firewall rules"
+    )
+    parser.add_argument("--apply", action="store_true", help="Apply firewall rules")
+    parser.add_argument("--clear", action="store_true", help="Clear firewall rules")
+
+    args = parser.parse_args()
+
+    if args.sniffer:
+        run_sniffer()
+    elif args.list:
         list_rules()
-        from rich.prompt import Prompt
         Prompt.ask("Press Enter to exit")
-        sys.exit(0)
-    elif "--add" in sys.argv:
+    elif args.add:
         add_rule()
-        from rich.prompt import Prompt
         Prompt.ask("Press Enter to exit")
-        sys.exit(0)
-    elif "--remove" in sys.argv:
+    elif args.remove:
         remove_rule_interactive()
-        from rich.prompt import Prompt
         Prompt.ask("Press Enter to exit")
-        sys.exit(0)
-    elif "--edit" in sys.argv:
+    elif args.edit:
         edit_rule()
-        from rich.prompt import Prompt
         Prompt.ask("Press Enter to exit")
-        sys.exit(0)
-    elif "--search" in sys.argv:
+    elif args.search:
         search_filter_rules()
-        sys.exit(0)
-    elif "--apply" in sys.argv:
+        Prompt.ask("Press Enter to exit")
+    elif args.apply:
         apply_firewall_rules()
-        sys.exit(0)
-    elif "--clear" in sys.argv:
+    elif args.clear:
         clear_firewall_rules()
-        sys.exit(0)
     else:
         integrated_dashboard()
+
+
+if __name__ == "__main__":
+    main()

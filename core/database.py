@@ -1,9 +1,6 @@
-#ruledatabase.py
 import json
 import logging
-from rich.console import Console
-
-console = Console()
+from config import console
 
 def load_rules():
     try:

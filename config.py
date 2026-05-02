@@ -1,9 +1,10 @@
-#config.py
 import os
 import sys
 import logging
 import threading
 from rich.console import Console
+
+SCRIPT_PATH = os.path.abspath(sys.argv[0])
 
 logging.basicConfig(
     level=logging.INFO,
@@ -16,8 +17,7 @@ logging.basicConfig(
 
 console = Console()
 
+# Global state for sniffer and dashboard communication
 sniffed_packets = []
 sniff_lock = threading.Lock()
 sniffing_active = True
-
-SCRIPT_PATH = os.path.abspath(sys.argv[0])

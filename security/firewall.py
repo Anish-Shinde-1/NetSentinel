@@ -1,17 +1,18 @@
-#firewall.py
 import subprocess
 import logging
+from rich.prompt import Prompt
+
 from config import console
-from rule_database import load_rules, save_rules
+from core.database import load_rules, save_rules
 
 
 def apply_firewall_rule(rule):
     logging.info(f"Applying rule: {rule}")
-    
+
     app_path = rule.get("app", "").replace("\\\\", "\\") if "app" in rule else None
     protocol = rule.get("protocol", "TCP").upper() if rule.get("protocol") else None
     direction = rule.get("direction", "both").lower()
-    
+
     if direction == "inbound":
         ps_direction = "Inbound"
     elif direction == "outbound":
@@ -21,7 +22,7 @@ def apply_firewall_rule(rule):
 
     cmd = None
     display_name = None
-    
+
     if "app" in rule and "dst_ip" in rule and "port" in rule and protocol:
         display_name = f"Block {app_path} on {rule['dst_ip']}:{rule['port']}"
         cmd = (
@@ -71,7 +72,8 @@ def apply_firewall_rule(rule):
     if cmd:
         result = subprocess.run(
             ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd],
-            capture_output=True, text=True
+            capture_output=True,
+            text=True,
         )
         if result.returncode != 0:
             console.print(f"[bold red][ERROR][/bold red] Failed to apply rule: {result.stderr}")
@@ -82,10 +84,11 @@ def apply_firewall_rule(rule):
 
     if rule.get("direction", "both").lower() == "both" and cmd:
         extra_direction = "Inbound" if ps_direction == "Outbound" else "Outbound"
-        extra_cmd = cmd.replace(f'-Direction {ps_direction}', f'-Direction {extra_direction}')
+        extra_cmd = cmd.replace(f"-Direction {ps_direction}", f"-Direction {extra_direction}")
         result = subprocess.run(
             ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", extra_cmd],
-            capture_output=True, text=True
+            capture_output=True,
+            text=True,
         )
         if result.returncode != 0:
             console.print(f"[bold red][ERROR][/bold red] Failed to apply {extra_direction} rule: {result.stderr}")
@@ -94,11 +97,14 @@ def apply_firewall_rule(rule):
             console.print(f"[bold green][INFO][/bold green] {extra_direction} rule applied successfully: {display_name}")
             logging.info(f"Applied additional rule for {extra_direction}: {extra_cmd}")
 
+
 def remove_firewall_rule(rule):
     logging.info(f"Removing rule: {rule}")
-    cmd = None
+
     app_path = rule.get("app", "") if "app" in rule else None
     port = rule.get("port", "")
+    cmd = None
+
     if "app" in rule and "dst_ip" in rule and port:
         cmd = f'Remove-NetFirewallRule -DisplayName "Block {app_path} on {rule["dst_ip"]}:{port}"'
     elif "app" in rule and "dst_ip" in rule:
@@ -119,17 +125,17 @@ def remove_firewall_rule(rule):
         logging.warning("No valid rule to remove.")
         return
 
-    
     result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd],
-        capture_output=True, text=True
+        capture_output=True,
+        text=True,
     )
     if result.returncode != 0:
         logging.info(f"Rule removal attempted, may not exist: {cmd}")
     else:
-        display_part = cmd.split('-DisplayName ')[1].split(' ')[0]
-        console.print(f"[bold green]Rule removed: {display_part}[/bold green]")
+        console.print("[bold green]Rule removed successfully.[/bold green]")
         logging.info(f"Removed firewall rule: {cmd}")
+
 
 def apply_firewall_rules():
     rules = load_rules()
@@ -139,20 +145,14 @@ def apply_firewall_rules():
         apply_firewall_rule(rule)
     console.print("[bold green]All rules applied.[/bold green]")
     logging.info("Applied all firewall rules")
-    from rich.prompt import Prompt
     Prompt.ask("Press Enter to exit")
+
 
 def clear_firewall_rules():
     rules = load_rules()
     for rule in rules:
         remove_firewall_rule(rule)
-    save_rules([])  # Clear rules.json
+    save_rules([])
     console.print("[bold green]All firewall rules cleared.[/bold green]")
     logging.info("Cleared all firewall rules")
-    from rich.prompt import Prompt
     Prompt.ask("Press Enter to exit")
-
-def process_firewall_rules():
-    rules = load_rules()
-    for rule in rules:
-        apply_firewall_rule(rule)

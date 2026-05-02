@@ -16,6 +16,7 @@ NetSentinel Ref/
 .venv/
 venv/
 *.env
+.ruff_cache/
 
 # Editor and OS-specific files
 .DS_Store
