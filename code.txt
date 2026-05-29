@@ -1,0 +1,2723 @@
+
+--- FILE: __init__.py ---
+#__init.py
+
+
+
+--- FILE: config.py ---
+import os
+import sys
+import logging
+import threading
+from rich.console import Console
+
+SCRIPT_PATH = os.path.abspath(sys.argv[0])
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("firewall.log"),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+
+console = Console()
+
+# Global state for sniffer and dashboard communication
+sniffed_packets = []
+sniff_lock = threading.Lock()
+sniffing_active = True
+
+
+
+--- FILE: main.py ---
+import argparse
+import sys
+from rich.prompt import Prompt
+
+from utils.admin import is_admin
+from config import console
+from ui.dashboard import integrated_dashboard
+from ui.prompts import (
+    list_rules,
+    add_rule,
+    remove_rule_interactive,
+    edit_rule,
+    search_filter_rules,
+)
+from security.firewall import apply_firewall_rules, clear_firewall_rules
+from network.cache import port_cache
+
+
+def run_sniffer():
+    from scapy.all import sniff
+    import time
+
+    console.print(
+        "[bold cyan]Starting packet sniffing... Press Ctrl+C to stop.[/bold cyan]"
+    )
+    try:
+        sniff(
+            filter="ip or arp",
+            prn=lambda pkt: console.print(
+                f"{time.strftime('%H:%M:%S')} | {pkt.summary()}"
+            ),
+            store=False,
+        )
+    except KeyboardInterrupt:
+        console.print("[bold red]Packet sniffing stopped.[/bold red]")
+
+
+def main():
+    if not is_admin():
+        console.print("[bold red]ERROR: Requires administrator privileges[/bold red]")
+        sys.exit(1)
+
+    port_cache.start()
+
+    parser = argparse.ArgumentParser(
+        description="NetSentinel v1.0 - Network Monitor & Firewall Manager"
+    )
+    parser.add_argument(
+        "--sniffer", action="store_true", help="Start standalone packet sniffing"
+    )
+    parser.add_argument("--list", action="store_true", help="List firewall rules")
+    parser.add_argument("--add", action="store_true", help="Add firewall rule")
+    parser.add_argument("--remove", action="store_true", help="Remove firewall rule")
+    parser.add_argument("--edit", action="store_true", help="Edit firewall rule")
+    parser.add_argument(
+        "--search", action="store_true", help="Search/filter firewall rules"
+    )
+    parser.add_argument("--apply", action="store_true", help="Apply firewall rules")
+    parser.add_argument("--clear", action="store_true", help="Clear firewall rules")
+
+    args = parser.parse_args()
+
+    if args.sniffer:
+        run_sniffer()
+    elif args.list:
+        list_rules()
+        Prompt.ask("Press Enter to exit")
+    elif args.add:
+        add_rule()
+        Prompt.ask("Press Enter to exit")
+    elif args.remove:
+        remove_rule_interactive()
+        Prompt.ask("Press Enter to exit")
+    elif args.edit:
+        edit_rule()
+        Prompt.ask("Press Enter to exit")
+    elif args.search:
+        search_filter_rules()
+        Prompt.ask("Press Enter to exit")
+    elif args.apply:
+        apply_firewall_rules()
+    elif args.clear:
+        clear_firewall_rules()
+    else:
+        integrated_dashboard()
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+--- FILE: core/__init__.py ---
+
+
+
+--- FILE: core/database.py ---
+import json
+import logging
+
+from config import console
+from core.models import FirewallRule
+
+
+def load_rules() -> list[FirewallRule]:
+    try:
+        with open("rules.json", "r") as file:
+            rules = json.load(file)
+            unique_rules = []
+            seen = set()
+            for rule in rules:
+                rule = FirewallRule.from_dict(rule)
+
+                rule_key = (
+                    rule.name,
+                    rule.app,
+                    rule.dst_ip,
+                    rule.port,
+                    rule.direction,
+                    rule.action,
+                    rule.protocol,
+                )
+
+                if rule_key not in seen:
+                    seen.add(rule_key)
+                    unique_rules.append(rule)
+
+            logging.info("Loaded firewall rules")
+            return unique_rules
+
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        logging.warning(f"Failed to load rules: {e}")
+        return []
+
+
+def save_rules(rules: list[FirewallRule]):
+    try:
+        with open("rules.json", "w") as file:
+            json.dump([rule.to_dict() for rule in rules], file, indent=4)
+        logging.info("Saved firewall rules")
+    except Exception as e:
+        console.print(f"[bold red]Error saving rules: {e}[/bold red]")
+        logging.error(f"Error saving rules: {e}")
+
+
+
+--- FILE: core/models.py ---
+from dataclasses import dataclass, asdict
+from typing import Optional
+import uuid
+
+
+@dataclass(slots=True)
+class FirewallRule:
+    id: str
+    name: str
+
+    app: Optional[str] = None
+    dst_ip: Optional[str] = None
+    port: Optional[int] = None
+
+    direction: str = "both"
+    action: str = "block"
+
+    protocol: Optional[str] = None
+    enabled: bool = True
+
+    @property
+    def inbound_firewall_name(self) -> str:
+        return f"NetSentinel-{self.id}-IN"
+
+    @property
+    def outbound_firewall_name(self) -> str:
+        return f"NetSentinel-{self.id}-OUT"
+
+    @classmethod
+    def create(cls, name: str):
+        return cls(
+            id=uuid.uuid4().hex[:8],
+            name=name
+        )
+
+    def to_dict(self):
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict):
+        return cls(
+            id=data.get("id", uuid.uuid4().hex[:8]),
+            name=data.get("name", "Unnamed Rule"),
+            app=data.get("app"),
+            dst_ip=data.get("dst_ip"),
+            port=int(data["port"]) if data.get("port") else None,
+            direction=data.get("direction", "both"),
+            action=data.get("action", "block"),
+            protocol=data.get("protocol"),
+            enabled=data.get("enabled", True),
+        )
+
+
+
+--- FILE: NetSentinel Ref/tuifw/improvedtuifirewall.py ---
+import os
+import json
+import subprocess
+import threading
+import time
+import ctypes
+import sys
+import socket
+import psutil
+from scapy.all import sniff, IP, TCP, UDP, ICMP, ARP
+
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich.prompt import Prompt
+
+console = Console()
+
+# --- Admin Check ---
+def is_admin():
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except Exception as e:
+        console.log(f"[DEBUG] is_admin() exception: {e}")
+        return False
+
+if not is_admin():
+    console.print("[bold red]ERROR: Requires administrator privileges[/bold red]")
+    sys.exit(1)
+
+# --- Rule Management Functions ---
+def load_rules():
+    try:
+        with open("rules.json", "r") as file:
+            return json.load(file)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+def save_rules(rules):
+    with open("rules.json", "w") as file:
+        json.dump(rules, file, indent=4)
+
+def list_rules():
+    rules = load_rules()
+    if not rules:
+        console.print("[bold red]No rules defined.[/bold red]")
+    else:
+        table = Table(title="Firewall Rules", header_style="bold cyan")
+        table.add_column("Index", style="magenta", justify="center")
+        table.add_column("Name", style="green")
+        table.add_column("Application", style="yellow")
+        table.add_column("Destination IP", style="blue")
+        table.add_column("Port", style="red")
+        table.add_column("Direction", style="cyan")
+        table.add_column("Action", style="bright_white")
+        table.add_column("Protocol", style="bright_blue")
+        for idx, rule in enumerate(rules):
+            table.add_row(
+                str(idx),
+                rule.get("name", "N/A"),
+                rule.get("app", "N/A"),
+                rule.get("dst_ip", "N/A"),
+                str(rule.get("port", "N/A")),
+                rule.get("direction", "N/A"),
+                rule.get("action", "N/A"),
+                rule.get("protocol", "N/A")
+            )
+        console.print(table)
+
+def add_rule():
+    rule = {}
+    rule["name"] = Prompt.ask("Enter rule name").strip()
+    app_input = Prompt.ask("Enter application name (Optional)", default="").strip()
+    if app_input:
+        rule["app"] = get_full_app_path(app_input)
+    dst_ip = Prompt.ask("Enter destination IP (Optional)", default="").strip()
+    if dst_ip:
+        rule["dst_ip"] = dst_ip
+    port = Prompt.ask("Enter port (Optional)", default="").strip()
+    if port:
+        rule["port"] = port
+    rule["direction"] = Prompt.ask("Enter direction (inbound/outbound/both)", default="both").strip()
+    rule["action"] = Prompt.ask("Enter action (allow/block)", default="block").strip()
+    rule["protocol"] = Prompt.ask("Enter protocol (TCP/UDP)", default="TCP").strip()
+    rule["enabled"] = True
+
+    rules = load_rules()
+    rules.append(rule)
+    save_rules(rules)
+    console.print("[bold green]Rule added successfully.[/bold green]")
+
+def remove_rule_interactive():
+    rules = load_rules()
+    if not rules:
+        console.print("[bold red]No rules to remove.[/bold red]")
+        return
+    list_rules()
+    try:
+        index = int(Prompt.ask("Enter the index of the rule to remove"))
+        if 0 <= index < len(rules):
+            removed_rule = rules.pop(index)
+            save_rules(rules)
+            console.print(f"[bold green]Removed rule:[/bold green] {removed_rule}")
+            remove_firewall_rule(removed_rule)
+        else:
+            console.print("[bold red]Invalid index.[/bold red]")
+    except ValueError:
+        console.print("[bold red]Invalid input.[/bold red]")
+
+# --- PowerShell Firewall Functions ---
+def apply_firewall_rule(rule):
+    protocol = rule.get("protocol", "TCP").upper()
+    cmd = None
+    if "app" in rule and "dst_ip" in rule and "port" in rule:
+        cmd = (f'New-NetFirewallRule -DisplayName "Block {rule["app"]} on {rule["dst_ip"]}:{rule["port"]}" '
+               f'-Direction Outbound -Program "{rule["app"]}" -RemoteAddress {rule["dst_ip"]} '
+               f'-Protocol {protocol} -RemotePort {rule["port"]} -Action Block')
+    elif "app" in rule and "dst_ip" in rule:
+        cmd = (f'New-NetFirewallRule -DisplayName "Block {rule["app"]} on {rule["dst_ip"]}" '
+               f'-Direction Outbound -Program "{rule["app"]}" -RemoteAddress {rule["dst_ip"]} -Action Block')
+    elif "dst_ip" in rule and "port" in rule:
+        cmd = (f'New-NetFirewallRule -DisplayName "Block IP {rule["dst_ip"]}:{rule["port"]}" '
+               f'-Direction Outbound -RemoteAddress {rule["dst_ip"]} '
+               f'-Protocol {protocol} -RemotePort {rule["port"]} -Action Block')
+    elif "app" in rule and "port" in rule:
+        cmd = (f'New-NetFirewallRule -DisplayName "Block {rule["app"]} on Port {rule["port"]}" '
+               f'-Direction Outbound -Program "{rule["app"]}" '
+               f'-Protocol {protocol} -RemotePort {rule["port"]} -Action Block')
+    elif "app" in rule:
+        cmd = (f'New-NetFirewallRule -DisplayName "Block {rule["app"]}" '
+               f'-Direction Outbound -Program "{rule["app"]}" -Action Block')
+    elif "dst_ip" in rule:
+        cmd = (f'New-NetFirewallRule -DisplayName "Block IP {rule["dst_ip"]}" '
+               f'-Direction Outbound -RemoteAddress {rule["dst_ip"]} -Action Block')
+    elif "port" in rule:
+        cmd = (f'New-NetFirewallRule -DisplayName "Block Port {rule["port"]}" '
+               f'-Direction Outbound -Protocol {protocol} -RemotePort {rule["port"]} -Action Block')
+    
+    if cmd:
+        console.print(f"[bold cyan][DEBUG][/bold cyan] Executing command: [yellow]{cmd}[/yellow]")
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            console.print(f"[bold red][ERROR][/bold red] Failed to apply rule. Error: {result.stderr}")
+        else:
+            console.print(f"[bold green][INFO][/bold green] Rule applied successfully. Output: {result.stdout}")
+
+def remove_firewall_rule(rule):
+    if "app" in rule and "dst_ip" in rule and "port" in rule:
+        cmd = f'Remove-NetFirewallRule -DisplayName "Block {rule["app"]} on {rule["dst_ip"]}:{rule["port"]}"'
+    elif "app" in rule and "dst_ip" in rule:
+        cmd = f'Remove-NetFirewallRule -DisplayName "Block {rule["app"]} on {rule["dst_ip"]}"'
+    elif "dst_ip" in rule and "port" in rule:
+        cmd = f'Remove-NetFirewallRule -DisplayName "Block IP {rule["dst_ip"]}:{rule["port"]}"'
+    elif "app" in rule and "port" in rule:
+        cmd = f'Remove-NetFirewallRule -DisplayName "Block {rule["app"]} on Port {rule["port"]}"'
+    elif "app" in rule:
+        cmd = f'Remove-NetFirewallRule -DisplayName "Block {rule["app"]}"'
+    elif "dst_ip" in rule:
+        cmd = f'Remove-NetFirewallRule -DisplayName "Block IP {rule["dst_ip"]}"'
+    elif "port" in rule:
+        cmd = f'Remove-NetFirewallRule -DisplayName "Block Port {rule["port"]}"'
+    else:
+        return
+    console.print(f"[bold cyan][DEBUG][/bold cyan] Removing firewall rule: [yellow]{cmd}[/yellow]")
+    subprocess.run(["powershell", "-Command", cmd], shell=True, capture_output=True, text=True)
+
+def process_firewall_rules():
+    rules = load_rules()
+    for rule in rules:
+        apply_firewall_rule(rule)
+
+def clear_firewall_rules():
+    rules = load_rules()
+    for rule in rules:
+        remove_firewall_rule(rule)
+    console.print("[bold green]All firewall rules cleared.[/bold green]")
+
+# --- Utility Function ---
+def get_full_app_path(app_name):
+    ps_cmd = f"Get-ChildItem -Path 'C:\\Program Files\\' -Filter '{app_name}' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName"
+    try:
+        result = subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True, text=True)
+        full_path = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
+        if full_path:
+            return full_path
+    except Exception as e:
+        console.print(f"[bold red][ERROR][/bold red] Failed to retrieve path for {app_name}: {e}")
+    return app_name
+
+# --- Application Name Lookup for Packet Sniffing ---
+def get_app_name(packet):
+    """
+    Attempts to determine the application name associated with a packet
+    by matching the local port (if the packet is inbound or outbound) to a process.
+    """
+    app_name = "N/A"
+    local_ips = socket.gethostbyname_ex(socket.gethostname())[2]
+    
+    if packet.haslayer(TCP):
+        sport = packet[TCP].sport
+        dport = packet[TCP].dport
+    elif packet.haslayer(UDP):
+        sport = packet[UDP].sport
+        dport = packet[UDP].dport
+    else:
+        return app_name
+
+    local_port = None
+    if packet[IP].src in local_ips:
+        local_port = sport
+    elif packet[IP].dst in local_ips:
+        local_port = dport
+
+    if not local_port:
+        return app_name
+
+    for conn in psutil.net_connections(kind="inet"):
+        try:
+            if conn.laddr and conn.laddr.port == local_port:
+                if conn.pid:
+                    proc = psutil.Process(conn.pid)
+                    app_name = proc.name()
+                    break
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            continue
+    return app_name
+
+# --- Packet Sniffing Functions ---
+def extract_context(packet):
+    src_ip = dst_ip = "N/A"
+    protocol = "Unknown"
+    port = None
+    app_name = "N/A"
+
+    if packet.haslayer(IP):
+        src_ip = packet[IP].src
+        dst_ip = packet[IP].dst
+        protocol = {6: "TCP", 17: "UDP"}.get(packet[IP].proto, "Other")
+
+    if packet.haslayer(TCP):
+        port = packet[TCP].sport
+    elif packet.haslayer(UDP):
+        port = packet[UDP].sport
+    elif packet.haslayer(ICMP):
+        protocol = "ICMP"
+    elif packet.haslayer(ARP):
+        src_ip = packet[ARP].psrc
+        dst_ip = packet[ARP].pdst
+        protocol = "ARP"
+
+    if protocol in ("TCP", "UDP"):
+        app_name = get_app_name(packet)
+
+    console.print(f"[bold blue]{time.strftime('%H:%M:%S')}[/bold blue] | [green]{src_ip}[/green] -> [green]{dst_ip}[/green] | Protocol: [yellow]{protocol}[/yellow] | Port: [red]{port}[/red] | App: [magenta]{app_name}[/magenta]")
+
+def packet_sniffer():
+    console.print("[bold cyan]Starting packet sniffing... Press Ctrl+C to stop.[/bold cyan]")
+    try:
+        sniff(filter="ip or arp", prn=extract_context, store=False)
+    except KeyboardInterrupt:
+        console.print("[bold red]Packet sniffing stopped.[/bold red]")
+
+# --- Main Menu Interface ---
+def main_menu():
+    while True:
+        os.system("cls" if os.name == "nt" else "clear")
+        menu_panel = Panel.fit(
+            "[bold cyan]1.[/] Start Packet Sniffing (new terminal)\n"
+            "[bold cyan]2.[/] List Firewall Rules\n"
+            "[bold cyan]3.[/] Add Firewall Rule\n"
+            "[bold cyan]4.[/] Remove Firewall Rule\n"
+            "[bold cyan]5.[/] Apply Firewall Rules\n"
+            "[bold cyan]6.[/] Clear All Firewall Rules\n"
+            "[bold cyan]7.[/] Exit",
+            title="[bold magenta]Firewall Control[/bold magenta]",
+            border_style="bright_magenta"
+        )
+        console.print(menu_panel)
+        choice = Prompt.ask("[bold green]Enter your choice[/bold green]", choices=["1", "2", "3", "4", "5", "6", "7"])
+        if choice == "1":
+            cmd = f'start cmd /k "{sys.executable} \"{os.path.abspath(__file__)}\" --sniffer"'
+            subprocess.Popen(cmd, shell=True)
+        elif choice == "2":
+            list_rules()
+            Prompt.ask("[bold green]Press Enter to continue[/bold green]")
+        elif choice == "3":
+            add_rule()
+            Prompt.ask("[bold green]Press Enter to continue[/bold green]")
+        elif choice == "4":
+            remove_rule_interactive()
+            Prompt.ask("[bold green]Press Enter to continue[/bold green]")
+        elif choice == "5":
+            process_firewall_rules()
+            Prompt.ask("[bold green]Press Enter to continue[/bold green]")
+        elif choice == "6":
+            clear_firewall_rules()
+            Prompt.ask("[bold green]Press Enter to continue[/bold green]")
+        elif choice == "7":
+            console.print("[bold red]Exiting...[/bold red]")
+            break
+
+# --- Entry Point ---
+if __name__ == "__main__":
+    if "--sniffer" in sys.argv:
+        packet_sniffer()
+    else:
+        main_menu()
+
+
+
+--- FILE: NetSentinel Ref/tuifw/newtuifw.py ---
+import os
+import json
+import subprocess
+import time
+import ctypes
+import sys
+import socket
+import psutil
+import ipaddress
+import logging
+
+from scapy.all import sniff, IP, TCP, UDP, ICMP, ARP
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich.prompt import Prompt
+from rich.live import Live
+from rich.layout import Layout
+
+# --- Logging Setup ---
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("firewall.log"),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+
+console = Console()
+
+# --- Admin Check ---
+def is_admin():
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except Exception as e:
+        console.log(f"[DEBUG] is_admin() exception: {e}")
+        logging.error(f"is_admin() exception: {e}")
+        return False
+
+if not is_admin():
+    console.print("[bold red]ERROR: Requires administrator privileges[/bold red]")
+    sys.exit(1)
+
+# --- Rule Persistence Functions ---
+def load_rules():
+    try:
+        with open("rules.json", "r") as file:
+            rules = json.load(file)
+            logging.info("Loaded firewall rules")
+            return rules
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        logging.warning(f"Failed to load rules: {e}")
+        return []
+
+def save_rules(rules):
+    try:
+        with open("rules.json", "w") as file:
+            json.dump(rules, file, indent=4)
+        logging.info("Saved firewall rules")
+    except Exception as e:
+        console.print(f"[bold red]Error saving rules: {e}[/bold red]")
+        logging.error(f"Error saving rules: {e}")
+
+# --- Input Validation Functions ---
+def validate_ip(ip_str):
+    try:
+        ipaddress.ip_address(ip_str)
+        return True
+    except ValueError:
+        return False
+
+def validate_port(port_str):
+    return port_str.isdigit()
+
+# --- Rule Management Functions ---
+def list_rules(filter_term=""):
+    rules = load_rules()
+    if filter_term:
+        rules = [r for r in rules if filter_term.lower() in r.get("name", "").lower() or
+                                   filter_term.lower() in r.get("app", "").lower()]
+    if not rules:
+        console.print("[bold red]No matching rules found.[/bold red]")
+        return
+
+    table = Table(title="Firewall Rules", header_style="bold cyan")
+    table.add_column("Index", style="magenta", justify="center")
+    table.add_column("Name", style="green")
+    table.add_column("Application", style="yellow")
+    table.add_column("Destination IP", style="blue")
+    table.add_column("Port", style="red")
+    table.add_column("Direction", style="cyan")
+    table.add_column("Action", style="bright_white")
+    table.add_column("Protocol", style="bright_blue")
+    for idx, rule in enumerate(rules):
+        table.add_row(
+            str(idx),
+            rule.get("name", "N/A"),
+            rule.get("app", "N/A"),
+            rule.get("dst_ip", "N/A"),
+            str(rule.get("port", "N/A")),
+            rule.get("direction", "N/A"),
+            rule.get("action", "N/A"),
+            rule.get("protocol", "N/A")
+        )
+    console.print(table)
+
+def add_rule():
+    rule = {}
+    rule["name"] = Prompt.ask("Enter rule name").strip()
+    app_input = Prompt.ask("Enter application name (Optional)", default="").strip()
+    if app_input:
+        rule["app"] = get_full_app_path(app_input)
+    dst_ip = Prompt.ask("Enter destination IP (Optional)", default="").strip()
+    if dst_ip:
+        if validate_ip(dst_ip):
+            rule["dst_ip"] = dst_ip
+        else:
+            console.print("[bold red]Invalid IP address.[/bold red]")
+            logging.error("Attempted to add rule with invalid IP address")
+            return
+    port = Prompt.ask("Enter port (Optional)", default="").strip()
+    if port:
+        if validate_port(port):
+            rule["port"] = port
+        else:
+            console.print("[bold red]Port must be numeric.[/bold red]")
+            logging.error("Attempted to add rule with non-numeric port")
+            return
+    rule["direction"] = Prompt.ask("Enter direction (inbound/outbound/both)", default="both").strip().lower()
+    rule["action"] = Prompt.ask("Enter action (allow/block)", default="block").strip().lower()
+    rule["protocol"] = Prompt.ask("Enter protocol (TCP/UDP)", default="TCP").strip().upper()
+    rule["enabled"] = True
+
+    rules = load_rules()
+    rules.append(rule)
+    save_rules(rules)
+    console.print("[bold green]Rule added successfully.[/bold green]")
+    logging.info(f"Added rule: {rule}")
+
+def remove_rule_interactive():
+    rules = load_rules()
+    if not rules:
+        console.print("[bold red]No rules to remove.[/bold red]")
+        return
+    list_rules()
+    try:
+        index = int(Prompt.ask("Enter the index of the rule to remove"))
+        if 0 <= index < len(rules):
+            removed_rule = rules.pop(index)
+            save_rules(rules)
+            console.print(f"[bold green]Removed rule:[/bold green] {removed_rule}")
+            logging.info(f"Removed rule: {removed_rule}")
+            remove_firewall_rule(removed_rule)
+        else:
+            console.print("[bold red]Invalid index.[/bold red]")
+    except ValueError:
+        console.print("[bold red]Invalid input.[/bold red]")
+        logging.error("Non-integer input for rule removal")
+
+def edit_rule():
+    rules = load_rules()
+    if not rules:
+        console.print("[bold red]No rules available to edit.[/bold red]")
+        return
+    list_rules()
+    try:
+        index = int(Prompt.ask("Enter the index of the rule to edit"))
+        if 0 <= index < len(rules):
+            rule = rules[index]
+            console.print(f"Editing rule: [bold yellow]{rule.get('name', 'N/A')}[/bold yellow]")
+            rule["name"] = Prompt.ask("Enter rule name", default=rule.get("name", "")).strip()
+            app_input = Prompt.ask("Enter application name (Optional)", default=rule.get("app", "")).strip()
+            if app_input:
+                rule["app"] = get_full_app_path(app_input)
+            dst_ip = Prompt.ask("Enter destination IP (Optional)", default=rule.get("dst_ip", "")).strip()
+            if dst_ip:
+                if validate_ip(dst_ip):
+                    rule["dst_ip"] = dst_ip
+                else:
+                    console.print("[bold red]Invalid IP address.[/bold red]")
+                    return
+            port = Prompt.ask("Enter port (Optional)", default=str(rule.get("port", ""))).strip()
+            if port:
+                if validate_port(port):
+                    rule["port"] = port
+                else:
+                    console.print("[bold red]Port must be numeric.[/bold red]")
+                    return
+            rule["direction"] = Prompt.ask("Enter direction (inbound/outbound/both)", default=rule.get("direction", "both")).strip().lower()
+            rule["action"] = Prompt.ask("Enter action (allow/block)", default=rule.get("action", "block")).strip().lower()
+            rule["protocol"] = Prompt.ask("Enter protocol (TCP/UDP)", default=rule.get("protocol", "TCP")).strip().upper()
+            rules[index] = rule
+            save_rules(rules)
+            console.print("[bold green]Rule updated successfully.[/bold green]")
+            logging.info(f"Updated rule: {rule}")
+        else:
+            console.print("[bold red]Invalid index.[/bold red]")
+    except ValueError:
+        console.print("[bold red]Invalid input.[/bold red]")
+        logging.error("Non-integer input for rule editing")
+
+# --- PowerShell Firewall Functions ---
+def apply_firewall_rule(rule):
+    protocol = rule.get("protocol", "TCP").upper()
+    direction = rule.get("direction", "both").lower()
+    # Determine proper PowerShell direction(s)
+    if direction == "inbound":
+        ps_direction = "Inbound"
+    elif direction == "outbound":
+        ps_direction = "Outbound"
+    else:
+        # For both, we will create two rules (inbound and outbound)
+        ps_direction = "Outbound"
+
+    cmd = None
+    # Build command based on available rule parameters.
+    # If rule should be applied for both directions, apply outbound now and later inbound.
+    if "app" in rule and "dst_ip" in rule and "port" in rule:
+        cmd = (f'New-NetFirewallRule -DisplayName "Block {rule["app"]} on {rule["dst_ip"]}:{rule["port"]}" '
+               f'-Direction {ps_direction} -Program "{rule["app"]}" -RemoteAddress {rule["dst_ip"]} '
+               f'-Protocol {protocol} -RemotePort {rule["port"]} -Action Block')
+    elif "app" in rule and "dst_ip" in rule:
+        cmd = (f'New-NetFirewallRule -DisplayName "Block {rule["app"]} on {rule["dst_ip"]}" '
+               f'-Direction {ps_direction} -Program "{rule["app"]}" -RemoteAddress {rule["dst_ip"]} -Action Block')
+    elif "dst_ip" in rule and "port" in rule:
+        cmd = (f'New-NetFirewallRule -DisplayName "Block IP {rule["dst_ip"]}:{rule["port"]}" '
+               f'-Direction {ps_direction} -RemoteAddress {rule["dst_ip"]} '
+               f'-Protocol {protocol} -RemotePort {rule["port"]} -Action Block')
+    elif "app" in rule and "port" in rule:
+        cmd = (f'New-NetFirewallRule -DisplayName "Block {rule["app"]} on Port {rule["port"]}" '
+               f'-Direction {ps_direction} -Program "{rule["app"]}" '
+               f'-Protocol {protocol} -RemotePort {rule["port"]} -Action Block')
+    elif "app" in rule:
+        cmd = (f'New-NetFirewallRule -DisplayName "Block {rule["app"]}" '
+               f'-Direction {ps_direction} -Program "{rule["app"]}" -Action Block')
+    elif "dst_ip" in rule:
+        cmd = (f'New-NetFirewallRule -DisplayName "Block IP {rule["dst_ip"]}" '
+               f'-Direction {ps_direction} -RemoteAddress {rule["dst_ip"]} -Action Block')
+    elif "port" in rule:
+        cmd = (f'New-NetFirewallRule -DisplayName "Block Port {rule["port"]}" '
+               f'-Direction {ps_direction} -Protocol {protocol} -RemotePort {rule["port"]} -Action Block')
+    
+    if cmd:
+        console.print(f"[bold cyan][DEBUG][/bold cyan] Executing command: [yellow]{cmd}[/yellow]")
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            console.print(f"[bold red][ERROR][/bold red] Failed to apply rule. Error: {result.stderr}")
+            logging.error(f"Failed to apply rule with command: {cmd}. Error: {result.stderr}")
+        else:
+            console.print(f"[bold green][INFO][/bold green] Rule applied successfully. Output: {result.stdout}")
+            logging.info(f"Applied rule: {cmd}")
+
+    # If the rule direction is both, apply the inverse direction as well.
+    if rule.get("direction", "both").lower() == "both":
+        extra_direction = "Inbound" if ps_direction == "Outbound" else "Outbound"
+        extra_cmd = cmd.replace(f'-Direction {ps_direction}', f'-Direction {extra_direction}')
+        console.print(f"[bold cyan][DEBUG][/bold cyan] Executing additional command for both directions: [yellow]{extra_cmd}[/yellow]")
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", extra_cmd],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            console.print(f"[bold red][ERROR][/bold red] Failed to apply additional rule. Error: {result.stderr}")
+            logging.error(f"Failed to apply additional rule: {extra_cmd}. Error: {result.stderr}")
+        else:
+            console.print(f"[bold green][INFO][/bold green] Additional rule applied successfully. Output: {result.stdout}")
+            logging.info(f"Applied additional rule for both directions: {extra_cmd}")
+
+def remove_firewall_rule(rule):
+    # Build command based on rule parameters (using outbound removal as default)
+    cmd = None
+    if "app" in rule and "dst_ip" in rule and "port" in rule:
+        cmd = f'Remove-NetFirewallRule -DisplayName "Block {rule["app"]} on {rule["dst_ip"]}:{rule["port"]}"'
+    elif "app" in rule and "dst_ip" in rule:
+        cmd = f'Remove-NetFirewallRule -DisplayName "Block {rule["app"]} on {rule["dst_ip"]}"'
+    elif "dst_ip" in rule and "port" in rule:
+        cmd = f'Remove-NetFirewallRule -DisplayName "Block IP {rule["dst_ip"]}:{rule["port"]}"'
+    elif "app" in rule and "port" in rule:
+        cmd = f'Remove-NetFirewallRule -DisplayName "Block {rule["app"]} on Port {rule["port"]}"'
+    elif "app" in rule:
+        cmd = f'Remove-NetFirewallRule -DisplayName "Block {rule["app"]}"'
+    elif "dst_ip" in rule:
+        cmd = f'Remove-NetFirewallRule -DisplayName "Block IP {rule["dst_ip"]}"'
+    elif "port" in rule:
+        cmd = f'Remove-NetFirewallRule -DisplayName "Block Port {rule["port"]}"'
+    else:
+        return
+    console.print(f"[bold cyan][DEBUG][/bold cyan] Removing firewall rule: [yellow]{cmd}[/yellow]")
+    result = subprocess.run(["powershell", "-Command", cmd], shell=True, capture_output=True, text=True)
+    if result.returncode != 0:
+        console.print(f"[bold red][ERROR][/bold red] Failed to remove rule. Error: {result.stderr}")
+        logging.error(f"Failed to remove firewall rule: {cmd}. Error: {result.stderr}")
+    else:
+        logging.info(f"Removed firewall rule: {cmd}")
+
+def process_firewall_rules():
+    rules = load_rules()
+    for rule in rules:
+        apply_firewall_rule(rule)
+
+def clear_firewall_rules():
+    rules = load_rules()
+    for rule in rules:
+        remove_firewall_rule(rule)
+    console.print("[bold green]All firewall rules cleared.[/bold green]")
+    logging.info("Cleared all firewall rules")
+
+# --- Utility Function ---
+def get_full_app_path(app_name):
+    ps_cmd = f"Get-ChildItem -Path 'C:\\Program Files\\' -Filter '{app_name}' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName"
+    try:
+        result = subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True, text=True)
+        full_path = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
+        if full_path:
+            return full_path
+    except Exception as e:
+        console.print(f"[bold red][ERROR][/bold red] Failed to retrieve path for {app_name}: {e}")
+        logging.error(f"Failed to retrieve path for {app_name}: {e}")
+    return app_name
+
+# --- Application Name Lookup for Packet Sniffing ---
+def get_app_name(packet):
+    """
+    Attempts to determine the application name associated with a packet
+    by matching the local port to a process.
+    """
+    app_name = "N/A"
+    local_ips = socket.gethostbyname_ex(socket.gethostname())[2]
+    
+    if packet.haslayer(TCP):
+        sport = packet[TCP].sport
+        dport = packet[TCP].dport
+    elif packet.haslayer(UDP):
+        sport = packet[UDP].sport
+        dport = packet[UDP].dport
+    else:
+        return app_name
+
+    local_port = None
+    if packet[IP].src in local_ips:
+        local_port = sport
+    elif packet[IP].dst in local_ips:
+        local_port = dport
+
+    if not local_port:
+        return app_name
+
+    for conn in psutil.net_connections(kind="inet"):
+        try:
+            if conn.laddr and conn.laddr.port == local_port:
+                if conn.pid:
+                    proc = psutil.Process(conn.pid)
+                    app_name = proc.name()
+                    break
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            continue
+    return app_name
+
+# --- Packet Sniffing Functions ---
+def extract_context(packet):
+    src_ip = dst_ip = "N/A"
+    protocol = "Unknown"
+    port = None
+    app_name = "N/A"
+
+    if packet.haslayer(IP):
+        src_ip = packet[IP].src
+        dst_ip = packet[IP].dst
+        protocol = {6: "TCP", 17: "UDP"}.get(packet[IP].proto, "Other")
+
+    if packet.haslayer(TCP):
+        port = packet[TCP].sport
+    elif packet.haslayer(UDP):
+        port = packet[UDP].sport
+    elif packet.haslayer(ICMP):
+        protocol = "ICMP"
+    elif packet.haslayer(ARP):
+        src_ip = packet[ARP].psrc
+        dst_ip = packet[ARP].pdst
+        protocol = "ARP"
+
+    if protocol in ("TCP", "UDP"):
+        app_name = get_app_name(packet)
+
+    console.print(f"[bold blue]{time.strftime('%H:%M:%S')}[/bold blue] | [green]{src_ip}[/green] -> [green]{dst_ip}[/green] | Protocol: [yellow]{protocol}[/yellow] | Port: [red]{port}[/red] | App: [magenta]{app_name}[/magenta]")
+
+def packet_sniffer():
+    console.print("[bold cyan]Starting packet sniffing... Press Ctrl+C to stop.[/bold cyan]")
+    try:
+        sniff(filter="ip or arp", prn=extract_context, store=False)
+    except KeyboardInterrupt:
+        console.print("[bold red]Packet sniffing stopped.[/bold red]")
+        logging.info("Packet sniffing stopped by user")
+
+# --- CLI Dashboard ---
+def dashboard():
+    try:
+        with Live(refresh_per_second=2, screen=True) as live:
+            while True:
+                active_rules = len(load_rules())
+                status_panel = Panel(f"[bold cyan]{active_rules}[/bold cyan] active rules", title="Firewall Status")
+                log_panel = Panel("Recent Log Entries (see firewall.log for full details)", title="Logs")
+                layout = Layout()
+                layout.split_column(
+                    Layout(status_panel, size=3),
+                    Layout(log_panel, size=3)
+                )
+                live.update(layout)
+                time.sleep(1)
+    except KeyboardInterrupt:
+        console.print("[bold red]\nExiting Dashboard...[/bold red]")
+
+# --- Main Menu Interface ---
+def main_menu():
+    while True:
+        os.system("cls" if os.name == "nt" else "clear")
+        menu_panel = Panel.fit(
+            "[bold cyan]1.[/] Start Packet Sniffing (new terminal)\n"
+            "[bold cyan]2.[/] List Firewall Rules\n"
+            "[bold cyan]3.[/] Add Firewall Rule\n"
+            "[bold cyan]4.[/] Remove Firewall Rule\n"
+            "[bold cyan]5.[/] Edit Firewall Rule\n"
+            "[bold cyan]6.[/] Search/Filter Rules\n"
+            "[bold cyan]7.[/] Apply Firewall Rules\n"
+            "[bold cyan]8.[/] Clear All Firewall Rules\n"
+            "[bold cyan]9.[/] Dashboard\n"
+            "[bold cyan]0.[/] Exit",
+            title="[bold magenta]Firewall Control[/bold magenta]",
+            border_style="bright_magenta"
+        )
+        console.print(menu_panel)
+        choice = Prompt.ask("[bold green]Enter your choice[/bold green]", choices=[str(i) for i in range(10)])
+        if choice == "1":
+            cmd = f'start cmd /k "{sys.executable} \"{os.path.abspath(__file__)}\" --sniffer"'
+            subprocess.Popen(cmd, shell=True)
+        elif choice == "2":
+            list_rules()
+            Prompt.ask("[bold green]Press Enter to continue[/bold green]")
+        elif choice == "3":
+            add_rule()
+            Prompt.ask("[bold green]Press Enter to continue[/bold green]")
+        elif choice == "4":
+            remove_rule_interactive()
+            Prompt.ask("[bold green]Press Enter to continue[/bold green]")
+        elif choice == "5":
+            edit_rule()
+            Prompt.ask("[bold green]Press Enter to continue[/bold green]")
+        elif choice == "6":
+            term = Prompt.ask("Enter search term (by rule name or application)", default="")
+            list_rules(filter_term=term)
+            Prompt.ask("[bold green]Press Enter to continue[/bold green]")
+        elif choice == "7":
+            process_firewall_rules()
+            Prompt.ask("[bold green]Press Enter to continue[/bold green]")
+        elif choice == "8":
+            clear_firewall_rules()
+            Prompt.ask("[bold green]Press Enter to continue[/bold green]")
+        elif choice == "9":
+            dashboard()
+        elif choice == "0":
+            console.print("[bold red]Exiting...[/bold red]")
+            break
+
+# --- Entry Point ---
+if __name__ == "__main__":
+    if "--sniffer" in sys.argv:
+        packet_sniffer()
+    else:
+        main_menu()
+
+
+
+--- FILE: NetSentinel Ref/tuifw/splitwall.py ---
+import os
+import sys
+import json
+import subprocess
+import threading
+import time
+import ctypes
+import socket
+import psutil
+import ipaddress
+import logging
+import msvcrt  # for non-blocking keyboard input on Windows
+
+from scapy.all import sniff, IP, TCP, UDP, ICMP, ARP
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich.prompt import Prompt
+from rich.live import Live
+from rich.layout import Layout
+from rich.console import Group
+from rich.align import Align
+
+# --- Logging Setup ---
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("firewall.log"),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+
+console = Console()
+
+# --- Global Variables ---
+sniffed_packets = []  # List for formatted packet info
+sniff_lock = threading.Lock()
+sniffing_active = True   # Turn on live packet sniffing by default
+verbose = False  # Control debug verbosity
+
+# --- Admin Check ---
+def is_admin():
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except Exception as e:
+        logging.error(f"is_admin() exception: {e}")
+        return False
+
+if not is_admin():
+    console.print("[bold red]ERROR: Requires administrator privileges[/bold red]")
+    sys.exit(1)
+
+# --- Rule Persistence Functions ---
+def load_rules():
+    try:
+        with open("rules.json", "r") as file:
+            rules = json.load(file)
+            # Remove duplicates
+            unique_rules = []
+            seen = set()
+            for rule in rules:
+                rule_tuple = tuple(sorted(rule.items()))
+                if rule_tuple not in seen:
+                    seen.add(rule_tuple)
+                    unique_rules.append(rule)
+            logging.info("Loaded firewall rules")
+            return unique_rules
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        logging.warning(f"Failed to load rules: {e}")
+        return []
+
+def save_rules(rules):
+    try:
+        with open("rules.json", "w") as file:
+            json.dump(rules, file, indent=4)
+        logging.info("Saved firewall rules")
+    except Exception as e:
+        console.print(f"[bold red]Error saving rules: {e}[/bold red]")
+        logging.error(f"Error saving rules: {e}")
+
+# --- Input Validation Functions ---
+def validate_ip(ip_str):
+    try:
+        ipaddress.ip_address(ip_str)
+        return True
+    except ValueError:
+        return False
+
+def validate_port(port_str):
+    return port_str.isdigit()
+
+# --- Rule Management Functions ---
+def list_rules(filter_term=""):
+    rules = load_rules()
+    if filter_term:
+        rules = [r for r in rules if filter_term.lower() in r.get("name", "").lower() or
+                                   filter_term.lower() in r.get("app", "").lower()]
+    if not rules:
+        console.print("[bold red]No matching rules found.[/bold red]")
+        Prompt.ask("[bold green]Press Enter to return[/bold green]")
+        return
+
+    table = Table(title="Firewall Rules", header_style="bold cyan")
+    table.add_column("Index", style="magenta", justify="center")
+    table.add_column("Name", style="green")
+    table.add_column("Application", style="yellow")
+    table.add_column("Destination IP", style="blue")
+    table.add_column("Port", style="red")
+    table.add_column("Direction", style="cyan")
+    table.add_column("Action", style="bright_white")
+    table.add_column("Protocol", style="bright_blue")
+    for idx, rule in enumerate(rules):
+        table.add_row(
+            str(idx),
+            rule.get("name", "N/A"),
+            rule.get("app", "N/A"),
+            rule.get("dst_ip", "N/A"),
+            str(rule.get("port", "N/A")),
+            rule.get("direction", "N/A"),
+            rule.get("action", "N/A"),
+            rule.get("protocol", "N/A")
+        )
+    console.print(table)
+    Prompt.ask("[bold green]Press Enter to exit[/bold green]")
+
+def add_rule():
+    rule = {}
+    rule["name"] = Prompt.ask("Enter rule name").strip()
+    app_input = Prompt.ask("Enter application name (Optional)", default="").strip()
+    if app_input:
+        rule["app"] = get_full_app_path(app_input)
+    dst_ip = Prompt.ask("Enter destination IP (Optional)", default="").strip()
+    if dst_ip:
+        if validate_ip(dst_ip):
+            rule["dst_ip"] = dst_ip
+        else:
+            console.print("[bold red]Invalid IP address.[/bold red]")
+            logging.error("Attempted to add rule with invalid IP address")
+            return
+    port = Prompt.ask("Enter port (Optional, leave blank for all ports)", default="").strip()
+    if port:
+        if validate_port(port) and 1 <= int(port) <= 65535:
+            rule["port"] = port
+        else:
+            console.print("[bold red]Port must be a number between 1 and 65535.[/bold red]")
+            logging.error("Attempted to add rule with invalid port")
+            return
+    rule["direction"] = Prompt.ask("Enter direction (inbound/outbound/both)", default="both").strip().lower()
+    rule["action"] = Prompt.ask("Enter action (allow/block)", default="block").strip().lower()
+    protocol = Prompt.ask("Enter protocol (TCP/UDP, leave blank for all)", default="").strip().upper()
+    if protocol in ["TCP", "UDP"]:
+        rule["protocol"] = protocol
+    elif protocol:
+        console.print("[bold red]Protocol must be TCP or UDP.[/bold red]")
+        logging.error("Attempted to add rule with invalid protocol")
+        return
+    rule["enabled"] = True
+
+    rules = load_rules()
+    rules.append(rule)
+    save_rules(rules)
+    console.print("[bold green]Rule added successfully.[/bold green]")
+    logging.info(f"Added rule: {rule}")
+
+def remove_rule_interactive():
+    rules = load_rules()
+    if not rules:
+        console.print("[bold red]No rules to remove.[/bold red]")
+        return
+    list_rules()
+    try:
+        index = int(Prompt.ask("Enter the index of the rule to remove"))
+        if 0 <= index < len(rules):
+            removed_rule = rules.pop(index)
+            save_rules(rules)
+            console.print(f"[bold green]Removed rule:[/bold green] {removed_rule}")
+            logging.info(f"Removed rule: {removed_rule}")
+            remove_firewall_rule(removed_rule)
+        else:
+            console.print("[bold red]Invalid index.[/bold red]")
+    except ValueError:
+        console.print("[bold red]Invalid input.[/bold red]")
+        logging.error("Non-integer input for rule removal")
+
+def edit_rule():
+    rules = load_rules()
+    if not rules:
+        console.print("[bold red]No rules available to edit.[/bold red]")
+        return
+    list_rules()
+    try:
+        index = int(Prompt.ask("Enter the index of the rule to edit"))
+        if 0 <= index < len(rules):
+            rule = rules[index]
+            console.print(f"Editing rule: [bold yellow]{rule.get('name', 'N/A')}[/bold yellow]")
+            rule["name"] = Prompt.ask("Enter rule name", default=rule.get("name", "")).strip()
+            app_input = Prompt.ask("Enter application name (Optional)", default=rule.get("app", "")).strip()
+            if app_input:
+                rule["app"] = get_full_app_path(app_input)
+            else:
+                rule.pop("app", None)
+            dst_ip = Prompt.ask("Enter destination IP (Optional)", default=rule.get("dst_ip", "")).strip()
+            if dst_ip:
+                if validate_ip(dst_ip):
+                    rule["dst_ip"] = dst_ip
+                else:
+                    console.print("[bold red]Invalid IP address.[/bold red]")
+                    return
+            else:
+                rule.pop("dst_ip", None)
+            port = Prompt.ask("Enter port (Optional, leave blank for all ports)", default=str(rule.get("port", ""))).strip()
+            if port:
+                if validate_port(port) and 1 <= int(port) <= 65535:
+                    rule["port"] = port
+                else:
+                    console.print("[bold red]Port must be a number between 1 and 65535.[/bold red]")
+                    return
+            else:
+                rule.pop("port", None)
+            rule["direction"] = Prompt.ask("Enter direction (inbound/outbound/both)", default=rule.get("direction", "both")).strip().lower()
+            rule["action"] = Prompt.ask("Enter action (allow/block)", default=rule.get("action", "block")).strip().lower()
+            protocol = Prompt.ask("Enter protocol (TCP/UDP, leave blank for all)", default=rule.get("protocol", "")).strip().upper()
+            if protocol in ["TCP", "UDP"]:
+                rule["protocol"] = protocol
+            elif protocol:
+                console.print("[bold red]Protocol must be TCP or UDP.[/bold red]")
+                return
+            else:
+                rule.pop("protocol", None)
+            rules[index] = rule
+            save_rules(rules)
+            console.print("[bold green]Rule updated successfully.[/bold green]")
+            logging.info(f"Updated rule: {rule}")
+        else:
+            console.print("[bold red]Invalid index.[/bold red]")
+    except ValueError:
+        console.print("[bold red]Invalid input.[/bold red]")
+        logging.error("Non-integer input for rule editing")
+
+def search_filter_rules():
+    term = Prompt.ask("Enter search term (by rule name or application)", default="")
+    list_rules(filter_term=term)
+
+def apply_firewall_rules():
+    rules = load_rules()
+    for rule in rules:
+        remove_firewall_rule(rule)  # Clear any existing instances
+    for rule in rules:
+        apply_firewall_rule(rule)
+    console.print("[bold green]All rules applied.[/bold green]")
+    logging.info("Applied all firewall rules")
+    Prompt.ask("Press Enter to exit")
+
+def clear_firewall_rules():
+    rules = load_rules()
+    for rule in rules:
+        remove_firewall_rule(rule)
+    save_rules([])  # Clear rules.json
+    console.print("[bold green]All firewall rules cleared.[/bold green]")
+    logging.info("Cleared all firewall rules")
+    Prompt.ask("Press Enter to exit")
+
+# --- PowerShell Firewall Functions ---
+def apply_firewall_rule(rule):
+    logging.info(f"Applying rule: {rule}")
+    
+    # Normalize the path: convert double backslashes to single backslashes
+    app_path = rule.get("app", "").replace("\\\\", "\\") if "app" in rule else None
+    protocol = rule.get("protocol", "TCP").upper() if rule.get("protocol") else None
+    direction = rule.get("direction", "both").lower()
+    
+    # Determine PowerShell direction
+    if direction == "inbound":
+        ps_direction = "Inbound"
+    elif direction == "outbound":
+        ps_direction = "Outbound"
+    else:
+        ps_direction = "Outbound"
+
+    cmd = None
+    display_name = None
+    
+    if "app" in rule and "dst_ip" in rule and "port" in rule and protocol:
+        display_name = f"Block {app_path} on {rule['dst_ip']}:{rule['port']}"
+        cmd = (
+            f'New-NetFirewallRule -DisplayName "{display_name}" '
+            f'-Direction {ps_direction} -Program "{app_path}" -RemoteAddress {rule["dst_ip"]} '
+            f'-Protocol {protocol} -RemotePort {rule["port"]} -Action Block'
+        )
+    elif "app" in rule and "dst_ip" in rule:
+        display_name = f"Block {app_path} on {rule['dst_ip']}"
+        cmd = (
+            f'New-NetFirewallRule -DisplayName "{display_name}" '
+            f'-Direction {ps_direction} -Program "{app_path}" -RemoteAddress {rule["dst_ip"]} -Action Block'
+        )
+    elif "dst_ip" in rule and "port" in rule and protocol:
+        display_name = f"Block IP {rule['dst_ip']}:{rule['port']}"
+        cmd = (
+            f'New-NetFirewallRule -DisplayName "{display_name}" '
+            f'-Direction {ps_direction} -RemoteAddress {rule["dst_ip"]} '
+            f'-Protocol {protocol} -RemotePort {rule["port"]} -Action Block'
+        )
+    elif "app" in rule and "port" in rule and protocol:
+        display_name = f"Block {app_path} on Port {rule['port']}"
+        cmd = (
+            f'New-NetFirewallRule -DisplayName "{display_name}" '
+            f'-Direction {ps_direction} -Program "{app_path}" '
+            f'-Protocol {protocol} -RemotePort {rule["port"]} -Action Block'
+        )
+    elif "app" in rule:
+        display_name = f"Block {app_path}"
+        cmd = (
+            f'New-NetFirewallRule -DisplayName "{display_name}" '
+            f'-Direction {ps_direction} -Program "{app_path}" -Action Block'
+        )
+    elif "dst_ip" in rule:
+        display_name = f"Block IP {rule['dst_ip']}"
+        cmd = (
+            f'New-NetFirewallRule -DisplayName "{display_name}" '
+            f'-Direction {ps_direction} -RemoteAddress {rule["dst_ip"]} -Action Block'
+        )
+    elif "port" in rule and protocol:
+        display_name = f"Block Port {rule['port']}"
+        cmd = (
+            f'New-NetFirewallRule -DisplayName "{display_name}" '
+            f'-Direction {ps_direction} -Protocol {protocol} -RemotePort {rule["port"]} -Action Block'
+        )
+
+    if cmd:
+        if verbose:
+            console.print(f"[bold cyan][DEBUG][/bold cyan] Executing: {cmd}")
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            console.print(f"[bold red][ERROR][/bold red] Failed to apply rule: {result.stderr}")
+            logging.error(f"Failed to apply rule: {cmd}. Error: {result.stderr}")
+        else:
+            console.print(f"[bold green][INFO][/bold green] Rule applied successfully: {display_name}")
+            logging.info(f"Applied rule: {cmd}")
+
+    if rule.get("direction", "both").lower() == "both" and cmd:
+        extra_direction = "Inbound" if ps_direction == "Outbound" else "Outbound"
+        extra_cmd = cmd.replace(f'-Direction {ps_direction}', f'-Direction {extra_direction}')
+        if verbose:
+            console.print(f"[bold cyan][DEBUG][/bold cyan] Executing {extra_direction} rule: {extra_cmd}")
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", extra_cmd],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            console.print(f"[bold red][ERROR][/bold red] Failed to apply {extra_direction} rule: {result.stderr}")
+            logging.error(f"Failed to apply {extra_direction} rule: {extra_cmd}. Error: {result.stderr}")
+        else:
+            console.print(f"[bold green][INFO][/bold green] {extra_direction} rule applied successfully: {display_name}")
+            logging.info(f"Applied additional rule for {extra_direction}: {extra_cmd}")
+        
+def remove_firewall_rule(rule):
+    logging.info(f"Removing rule: {rule}")
+    cmd = None
+    app_path = rule.get("app", "") if "app" in rule else None  # Use original path, no doubling
+    port = rule.get("port", "")
+    if "app" in rule and "dst_ip" in rule and port:
+        cmd = f'Remove-NetFirewallRule -DisplayName "Block {app_path} on {rule["dst_ip"]}:{port}"'
+    elif "app" in rule and "dst_ip" in rule:
+        cmd = f'Remove-NetFirewallRule -DisplayName "Block {app_path} on {rule["dst_ip"]}"'
+    elif "dst_ip" in rule and port:
+        cmd = f'Remove-NetFirewallRule -DisplayName "Block IP {rule["dst_ip"]}:{port}"'
+    elif "app" in rule and port:
+        cmd = f'Remove-NetFirewallRule -DisplayName "Block {app_path} on Port {port}"'
+    elif "app" in rule:
+        cmd = f'Remove-NetFirewallRule -DisplayName "Block {app_path}"'
+    elif "dst_ip" in rule:
+        cmd = f'Remove-NetFirewallRule -DisplayName "Block IP {rule["dst_ip"]}"'
+    elif port:
+        cmd = f'Remove-NetFirewallRule -DisplayName "Block Port {port}"'
+
+    if not cmd:
+        console.print("[bold yellow][WARNING][/bold yellow] No valid rule to remove.")
+        logging.warning("No valid rule to remove.")
+        return
+
+    if verbose:
+        console.print(f"[bold cyan][DEBUG][/bold cyan] Removing: {cmd}")
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        if verbose:
+            console.print(f"[bold yellow][WARNING][/bold yellow] Failed to remove rule (may not exist): {result.stderr}")
+        logging.info(f"Rule removal attempted, may not exist: {cmd}")
+    else:
+        console.print(f"[bold green]Rule removed: {cmd.split('-DisplayName ')[1].split(' ')[0]}[/bold green]")
+        logging.info(f"Removed firewall rule: {cmd}")
+
+def process_firewall_rules():
+    rules = load_rules()
+    for rule in rules:
+        apply_firewall_rule(rule)
+
+# --- Utility Function ---
+def get_full_app_path(app_name):
+    ps_cmd = f"Get-ChildItem -Path 'C:\\Program Files\\' -Filter '{app_name}' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName"
+    try:
+        result = subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True, text=True)
+        full_path = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
+        if full_path:
+            return full_path
+    except Exception as e:
+        console.print(f"[bold red][ERROR][/bold red] Failed to retrieve path for {app_name}: {e}")
+        logging.error(f"Failed to retrieve path for {app_name}: {e}")
+    return app_name
+
+# --- Application Name Lookup for Packet Sniffing ---
+def get_app_name(packet):
+    app_name = "N/A"
+    local_ips = socket.gethostbyname_ex(socket.gethostname())[2]
+    
+    if packet.haslayer(TCP):
+        sport = packet[TCP].sport
+        dport = packet[TCP].dport
+    elif packet.haslayer(UDP):
+        sport = packet[UDP].sport
+        dport = packet[UDP].dport
+    else:
+        return app_name
+
+    local_port = None
+    if packet[IP].src in local_ips:
+        local_port = sport
+    elif packet[IP].dst in local_ips:
+        local_port = dport
+
+    if not local_port:
+        return app_name
+
+    for conn in psutil.net_connections(kind="inet"):
+        try:
+            if conn.laddr and conn.laddr.port == local_port:
+                if conn.pid:
+                    proc = psutil.Process(conn.pid)
+                    app_name = proc.name()
+                    break
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            continue
+    return app_name
+
+# --- Packet Sniffing Functions ---
+def sniff_prn(packet):
+    try:
+        if packet.haslayer(IP):
+            src_ip = packet[IP].src
+            dst_ip = packet[IP].dst
+            proto = {6: "TCP", 17: "UDP"}.get(packet[IP].proto, "Other")
+        else:
+            src_ip = dst_ip = "N/A"
+            proto = "N/A"
+        if packet.haslayer(TCP):
+            port = packet[TCP].sport
+        elif packet.haslayer(UDP):
+            port = packet[UDP].sport
+        elif packet.haslayer(ICMP):
+            proto = "ICMP"
+            port = ""
+        elif packet.haslayer(ARP):
+            src_ip = packet[ARP].psrc
+            dst_ip = packet[ARP].pdst
+            proto = "ARP"
+            port = ""
+        else:
+            port = ""
+        app_name = get_app_name(packet)
+        line = (f"[cyan]{time.strftime('%H:%M:%S')}[/cyan]  "
+                f"[green]{src_ip}[/green]  ->  [green]{dst_ip}[/green]  |  "
+                f"[yellow]{proto}[/yellow]  |  [red]Port: {port}[/red]  |  "
+                f"[plum4]App: {app_name}[/plum4]")
+        with sniff_lock:
+            sniffed_packets.append(line)
+            if len(sniffed_packets) > 30:
+                sniffed_packets.pop(0)
+    except Exception as e:
+        logging.error(f"Error in sniff_prn: {e}")
+
+def sniffer_thread_func():
+    while True:
+        if sniffing_active:
+            sniff(filter="ip or arp", prn=sniff_prn, store=False, timeout=0.5)
+        else:
+            time.sleep(0.5)
+
+# --- Integrated Dashboard ---
+def integrated_dashboard():
+    global sniffing_active
+    sniffer_thread = threading.Thread(target=sniffer_thread_func, daemon=True)
+    sniffer_thread.start()
+
+    exit_dashboard = False
+    last_command_time = 0
+
+    with Live(refresh_per_second=10, screen=True) as live:
+        while not exit_dashboard:
+            if msvcrt.kbhit():
+                ch = msvcrt.getch().decode('utf-8', errors='ignore').lower()
+                current_time = time.time()
+                if current_time - last_command_time < 1:
+                    pass
+                else:
+                    last_command_time = current_time
+                    if ch == '1':
+                        cmd = f'start cmd /c "{sys.executable} \"{os.path.abspath(__file__)}\" --list"'
+                        subprocess.Popen(cmd, shell=True)
+                    elif ch == '2':
+                        cmd = f'start cmd /c "{sys.executable} \"{os.path.abspath(__file__)}\" --add"'
+                        subprocess.Popen(cmd, shell=True)
+                    elif ch == '3':
+                        cmd = f'start cmd /c "{sys.executable} \"{os.path.abspath(__file__)}\" --remove"'
+                        subprocess.Popen(cmd, shell=True)
+                    elif ch == '4':
+                        cmd = f'start cmd /c "{sys.executable} \"{os.path.abspath(__file__)}\" --edit"'
+                        subprocess.Popen(cmd, shell=True)
+                    elif ch == '5':
+                        cmd = f'start cmd /c "{sys.executable} \"{os.path.abspath(__file__)}\" --search"'
+                        subprocess.Popen(cmd, shell=True)
+                    elif ch == '6':
+                        cmd = f'start cmd /c "{sys.executable} \"{os.path.abspath(__file__)}\" --apply"'
+                        subprocess.Popen(cmd, shell=True)
+                    elif ch == '7':
+                        cmd = f'start cmd /c "{sys.executable} \"{os.path.abspath(__file__)}\" --clear"'
+                        subprocess.Popen(cmd, shell=True)
+                    elif ch == '8':
+                        sniffing_active = not sniffing_active
+                    elif ch == '0':
+                        exit_dashboard = True
+            menu_items = [
+                ("📋", "1. List Firewall Rules"),
+                ("➕", "2. Add Firewall Rule"),
+                ("❌", "3. Remove Firewall Rule"),
+                ("📝", "4. Edit Firewall Rule"),
+                ("🔍", "5. Search/Filter Rules"),
+                ("🚀", "6. Apply Firewall Rules"),
+                ("🧹", "7. Clear All Firewall Rules"),
+                ("📡", f"8. Toggle Sniffing ({'ON' if sniffing_active else 'OFF'})"),
+                ("🚪", "0. Exit Dashboard")
+            ]
+            
+            menu_panels = [
+                Panel(
+                    Align.center(f"{icon} {label}", vertical="middle"),
+                    style="bold white on black",
+                    border_style="bright_black",
+                    padding=(0, 0)
+                )
+                for icon, label in menu_items
+            ]
+            
+            main_menu_group = Group(*menu_panels)
+            left_upper = Panel(
+                main_menu_group,
+                title="[bold cyan]Main Menu[/bold cyan]",
+                border_style="bright_black"
+            )
+            
+            try:
+                with open("firewall.log", "r") as f:
+                    log_lines = f.readlines()[-10:]
+            except Exception:
+                log_lines = ["No logs available."]
+            logs_text = ""
+            for line in log_lines:
+                parts = line.strip().split(' ', 2)
+                if len(parts) == 3:
+                    timestamp, level, message = parts
+                    level = level.strip("[]")
+                    color = {"INFO": "green", "WARNING": "yellow", "ERROR": "red"}.get(level, "white")
+                    logs_text += f"[cyan]{timestamp}[/cyan] [bold {color}]{level}[/bold {color}] {message}\n"
+                else:
+                    logs_text += line
+            left_lower = Panel(logs_text, title="Firewall Logs", border_style="bright_blue")
+            left_column = Layout()
+            left_column.split_column(
+                Layout(left_upper, ratio=3),
+                Layout(left_lower, ratio=2)
+            )
+            with sniff_lock:
+                packets_display = "\n\n".join(sniffed_packets) if sniffed_packets else "[grey]No packets captured.[/grey]"
+            right_panel = Panel(packets_display, title="Live Packet Sniffing", border_style="bright_green")
+            layout = Layout()
+            layout.split_row(
+                Layout(left_column, ratio=1),
+                Layout(right_panel, ratio=1)
+            )
+            live.update(layout)
+            time.sleep(0.1)
+
+# --- Entry Point ---
+if __name__ == "__main__":
+    if "--sniffer" in sys.argv:
+        console.print("[bold cyan]Starting packet sniffing... Press Ctrl+C to stop.[/bold cyan]")
+        try:
+            sniff(filter="ip or arp", prn=lambda pkt: console.print(f"{time.strftime('%H:%M:%S')} | {pkt.summary()}"), store=False)
+        except KeyboardInterrupt:
+            console.print("[bold red]Packet sniffing stopped.[/bold red]")
+    elif "--list" in sys.argv:
+        list_rules()
+        Prompt.ask("Press Enter to exit")
+        sys.exit(0)
+    elif "--add" in sys.argv:
+        add_rule()
+        Prompt.ask("Press Enter to exit")
+        sys.exit(0)
+    elif "--remove" in sys.argv:
+        remove_rule_interactive()
+        Prompt.ask("Press Enter to exit")
+        sys.exit(0)
+    elif "--edit" in sys.argv:
+        edit_rule()
+        Prompt.ask("Press Enter to exit")
+        sys.exit(0)
+    elif "--search" in sys.argv:
+        search_filter_rules()
+        sys.exit(0)
+    elif "--apply" in sys.argv:
+        apply_firewall_rules()
+        sys.exit(0)
+    elif "--clear" in sys.argv:
+        clear_firewall_rules()
+        sys.exit(0)
+    elif "--verbose" in sys.argv:
+        verbose = True
+        integrated_dashboard()
+    else:
+        integrated_dashboard()
+
+
+
+--- FILE: NetSentinel Ref/tuifw/tui_firewall.py ---
+import os
+import json
+import subprocess
+import threading
+import time
+import ctypes
+import sys
+import socket
+import psutil
+from scapy.all import sniff, IP, TCP, UDP, ICMP, ARP
+
+# --- Admin Check ---
+def is_admin():
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except Exception as e:
+        print(f"[DEBUG] is_admin() exception: {e}")
+        return False
+
+if not is_admin():
+    print("ERROR: Requires administrator privileges")
+    sys.exit(1)
+
+# --- Rule Management Functions ---
+def load_rules():
+    try:
+        with open("rules.json", "r") as file:
+            return json.load(file)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+def save_rules(rules):
+    with open("rules.json", "w") as file:
+        json.dump(rules, file, indent=4)
+
+def list_rules():
+    rules = load_rules()
+    if not rules:
+        print("No rules defined.")
+    else:
+        for idx, rule in enumerate(rules):
+            print(f"[{idx}] {rule}")
+
+def add_rule():
+    rule = {}
+    rule["name"] = input("Enter rule name: ").strip()
+    app_input = input("Enter application name (Optional): ").strip()
+    if app_input:
+        rule["app"] = get_full_app_path(app_input)
+    dst_ip = input("Enter destination IP (Optional): ").strip()
+    if dst_ip:
+        rule["dst_ip"] = dst_ip
+    port = input("Enter port (Optional): ").strip()
+    if port:
+        rule["port"] = port
+    rule["direction"] = input("Enter direction (inbound/outbound/both) [both]: ").strip() or "both"
+    rule["action"] = input("Enter action (allow/block) [block]: ").strip() or "block"
+    rule["protocol"] = input("Enter protocol (TCP/UDP) [TCP]: ").strip() or "TCP"
+    rule["enabled"] = True
+
+    rules = load_rules()
+    rules.append(rule)
+    save_rules(rules)
+    print("Rule added successfully.")
+
+def remove_rule_interactive():
+    rules = load_rules()
+    if not rules:
+        print("No rules to remove.")
+        return
+    list_rules()
+    try:
+        index = int(input("Enter the index of the rule to remove: "))
+        if 0 <= index < len(rules):
+            removed_rule = rules.pop(index)
+            save_rules(rules)
+            print(f"Removed rule: {removed_rule}")
+            remove_firewall_rule(removed_rule)
+        else:
+            print("Invalid index.")
+    except ValueError:
+        print("Invalid input.")
+
+# --- PowerShell Firewall Functions ---
+def apply_firewall_rule(rule):
+    # Use the provided protocol or default to TCP
+    protocol = rule.get("protocol", "TCP").upper()
+    cmd = None
+    if "app" in rule and "dst_ip" in rule and "port" in rule:
+        cmd = (f'New-NetFirewallRule -DisplayName "Block {rule["app"]} on {rule["dst_ip"]}:{rule["port"]}" '
+               f'-Direction Outbound -Program "{rule["app"]}" -RemoteAddress {rule["dst_ip"]} '
+               f'-Protocol {protocol} -RemotePort {rule["port"]} -Action Block')
+    elif "app" in rule and "dst_ip" in rule:
+        cmd = (f'New-NetFirewallRule -DisplayName "Block {rule["app"]} on {rule["dst_ip"]}" '
+               f'-Direction Outbound -Program "{rule["app"]}" -RemoteAddress {rule["dst_ip"]} -Action Block')
+    elif "dst_ip" in rule and "port" in rule:
+        cmd = (f'New-NetFirewallRule -DisplayName "Block IP {rule["dst_ip"]}:{rule["port"]}" '
+               f'-Direction Outbound -RemoteAddress {rule["dst_ip"]} '
+               f'-Protocol {protocol} -RemotePort {rule["port"]} -Action Block')
+    elif "app" in rule and "port" in rule:
+        cmd = (f'New-NetFirewallRule -DisplayName "Block {rule["app"]} on Port {rule["port"]}" '
+               f'-Direction Outbound -Program "{rule["app"]}" '
+               f'-Protocol {protocol} -RemotePort {rule["port"]} -Action Block')
+    elif "app" in rule:
+        cmd = (f'New-NetFirewallRule -DisplayName "Block {rule["app"]}" '
+               f'-Direction Outbound -Program "{rule["app"]}" -Action Block')
+    elif "dst_ip" in rule:
+        cmd = (f'New-NetFirewallRule -DisplayName "Block IP {rule["dst_ip"]}" '
+               f'-Direction Outbound -RemoteAddress {rule["dst_ip"]} -Action Block')
+    elif "port" in rule:
+        cmd = (f'New-NetFirewallRule -DisplayName "Block Port {rule["port"]}" '
+               f'-Direction Outbound -Protocol {protocol} -RemotePort {rule["port"]} -Action Block')
+    
+    if cmd:
+        print(f"[DEBUG] Executing command: {cmd}")
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            print(f"[ERROR] Failed to apply rule. Error: {result.stderr}")
+        else:
+            print(f"[INFO] Rule applied successfully. Output: {result.stdout}")
+
+
+
+def remove_firewall_rule(rule):
+    if "app" in rule and "dst_ip" in rule and "port" in rule:
+        cmd = f'Remove-NetFirewallRule -DisplayName "Block {rule["app"]} on {rule["dst_ip"]}:{rule["port"]}"'
+    elif "app" in rule and "dst_ip" in rule:
+        cmd = f'Remove-NetFirewallRule -DisplayName "Block {rule["app"]} on {rule["dst_ip"]}"'
+    elif "dst_ip" in rule and "port" in rule:
+        cmd = f'Remove-NetFirewallRule -DisplayName "Block IP {rule["dst_ip"]}:{rule["port"]}"'
+    elif "app" in rule and "port" in rule:
+        cmd = f'Remove-NetFirewallRule -DisplayName "Block {rule["app"]} on Port {rule["port"]}"'
+    elif "app" in rule:
+        cmd = f'Remove-NetFirewallRule -DisplayName "Block {rule["app"]}"'
+    elif "dst_ip" in rule:
+        cmd = f'Remove-NetFirewallRule -DisplayName "Block IP {rule["dst_ip"]}"'
+    elif "port" in rule:
+        cmd = f'Remove-NetFirewallRule -DisplayName "Block Port {rule["port"]}"'
+    else:
+        return
+    print(f"[DEBUG] Removing firewall rule: {cmd}")
+    subprocess.run(["powershell", "-Command", cmd], shell=True, capture_output=True, text=True)
+
+def process_firewall_rules():
+    rules = load_rules()
+    for rule in rules:
+        apply_firewall_rule(rule)
+
+def clear_firewall_rules():
+    rules = load_rules()
+    for rule in rules:
+        remove_firewall_rule(rule)
+    print("All firewall rules cleared.")
+
+# --- Utility Function ---
+def get_full_app_path(app_name):
+    ps_cmd = f"Get-ChildItem -Path 'C:\\Program Files\\' -Filter '{app_name}' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName"
+    try:
+        result = subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True, text=True)
+        full_path = result.stdout.strip()
+        if full_path:
+            return full_path
+    except Exception as e:
+        print(f"[ERROR] Failed to retrieve path for {app_name}: {e}")
+    return app_name
+
+# --- Application Name Lookup for Packet Sniffing ---
+def get_app_name(packet):
+    """
+    Attempts to determine the application name associated with a packet
+    by matching the local port (if the packet is inbound or outbound) to a process.
+    """
+    app_name = "N/A"
+    local_ips = socket.gethostbyname_ex(socket.gethostname())[2]
+    
+    # Only proceed for TCP/UDP packets
+    if packet.haslayer(TCP):
+        sport = packet[TCP].sport
+        dport = packet[TCP].dport
+    elif packet.haslayer(UDP):
+        sport = packet[UDP].sport
+        dport = packet[UDP].dport
+    else:
+        return app_name
+
+    # Determine which port is local based on the IPs
+    local_port = None
+    if packet[IP].src in local_ips:
+        local_port = sport
+    elif packet[IP].dst in local_ips:
+        local_port = dport
+
+    if not local_port:
+        return app_name
+
+    # Look up connections matching the local port
+    for conn in psutil.net_connections(kind="inet"):
+        try:
+            if conn.laddr and conn.laddr.port == local_port:
+                if conn.pid:
+                    proc = psutil.Process(conn.pid)
+                    app_name = proc.name()
+                    break
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            continue
+    return app_name
+
+# --- Packet Sniffing Functions ---
+def extract_context(packet):
+    src_ip = dst_ip = "N/A"
+    protocol = "Unknown"
+    port = None
+    app_name = "N/A"
+
+    if packet.haslayer(IP):
+        src_ip = packet[IP].src
+        dst_ip = packet[IP].dst
+        protocol = {6: "TCP", 17: "UDP"}.get(packet[IP].proto, "Other")
+
+    if packet.haslayer(TCP):
+        port = packet[TCP].sport
+    elif packet.haslayer(UDP):
+        port = packet[UDP].sport
+    elif packet.haslayer(ICMP):
+        protocol = "ICMP"
+    elif packet.haslayer(ARP):
+        src_ip = packet[ARP].psrc
+        dst_ip = packet[ARP].pdst
+        protocol = "ARP"
+
+    if protocol in ("TCP", "UDP"):
+        app_name = get_app_name(packet)
+
+    print(f"{time.strftime('%H:%M:%S')} | {src_ip} -> {dst_ip} | Protocol: {protocol} | Port: {port} | App: {app_name}")
+
+def packet_sniffer():
+    print("Starting packet sniffing... Press Ctrl+C to stop.")
+    try:
+        sniff(filter="ip or arp", prn=extract_context, store=False)
+    except KeyboardInterrupt:
+        print("Packet sniffing stopped.")
+
+# --- Main Menu Interface ---
+def main_menu():
+    while True:
+        print("\n--- Terminal Firewall Menu ---")
+        print("1. Start Packet Sniffing (new terminal)")
+        print("2. List Firewall Rules")
+        print("3. Add Firewall Rule")
+        print("4. Remove Firewall Rule")
+        print("5. Apply Firewall Rules")
+        print("6. Clear All Firewall Rules")
+        print("7. Exit")
+        choice = input("Enter your choice: ").strip()
+        if choice == "1":
+            # Spawn a new terminal window running this script with --sniffer flag
+            cmd = f'start cmd /k "{sys.executable} \"{os.path.abspath(__file__)}\" --sniffer"'
+            subprocess.Popen(cmd, shell=True)
+        elif choice == "2":
+            list_rules()
+        elif choice == "3":
+            add_rule()
+        elif choice == "4":
+            remove_rule_interactive()
+        elif choice == "5":
+            process_firewall_rules()
+        elif choice == "6":
+            clear_firewall_rules()
+        elif choice == "7":
+            print("Exiting...")
+            break
+        else:
+            print("Invalid choice. Please try again.")
+
+# --- Entry Point ---
+if __name__ == "__main__":
+    # If the script is launched with the --sniffer flag, run the packet sniffer and exit.
+    if "--sniffer" in sys.argv:
+        packet_sniffer()
+    else:
+        main_menu()
+
+
+
+--- FILE: network/__init__.py ---
+
+
+
+--- FILE: network/cache.py ---
+import psutil
+import threading
+import time
+import logging
+
+class ConnectionCache:
+    def __init__(self, update_interval: float = 3.0):
+        self.update_interval = update_interval
+        self._port_map: dict[int, str] = {}
+        self._lock = threading.Lock()
+        self._running = False
+        self._thread: threading.Thread | None = None
+
+    def start(self):
+        """Starts the background caching thread."""
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._update_loop, daemon=True)
+        self._thread.start()
+        logging.info("Connection cache background thread started.")
+
+    def stop(self):
+        """Stops the background thread."""
+        self._running = False
+        if self._thread:
+            self._thread.join()
+
+    def _update_loop(self):
+        """The loop that constantly queries psutil."""
+        while self._running:
+            new_map = {}
+            try:
+                for conn in psutil.net_connections(kind="inet"):
+                    if conn.laddr and conn.pid:
+                        try:
+                            proc = psutil.Process(conn.pid)
+                            new_map[conn.laddr.port] = proc.name()
+                        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                            continue
+                
+                with self._lock:
+                    self._port_map = new_map
+                    
+            except psutil.AccessDenied:
+                logging.error("Access denied when reading net_connections. Run as Administrator.")
+            except Exception as e:
+                logging.error(f"Error updating connection cache: {e}")
+
+            time.sleep(self.update_interval)
+
+    def get_app_name(self, port: int) -> str:
+        """O(1) lookup for the application name given a local port."""
+        with self._lock:
+            return self._port_map.get(port, "N/A")
+
+port_cache = ConnectionCache()
+
+
+
+--- FILE: network/mapper.py ---
+import subprocess
+import socket
+from scapy.layers.inet import IP
+from config import console
+from network.cache import port_cache
+
+
+def get_full_app_path(app_name):
+    ps_cmd = (
+        f"Get-ChildItem -Path 'C:\\Program Files\\' -Filter '{app_name}' -Recurse -ErrorAction SilentlyContinue "
+        f"| Select-Object -First 1 -ExpandProperty FullName"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell", "-Command", ps_cmd], capture_output=True, text=True
+        )
+        full_path = (
+            result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
+        )
+        if full_path:
+            return full_path
+    except Exception as e:
+        console.print(
+            f"[bold red][ERROR][/bold red] Failed to retrieve path for {app_name}: {e}"
+        )
+    return app_name
+
+
+def get_app_name(packet) -> str:
+    """Instantly resolves the app name using the O(1) cache."""
+    try:
+        local_ips = socket.gethostbyname_ex(socket.gethostname())[2]
+    except Exception:
+        local_ips = []
+
+    if packet.haslayer("TCP"):
+        sport = packet["TCP"].sport
+        dport = packet["TCP"].dport
+    elif packet.haslayer("UDP"):
+        sport = packet["UDP"].sport
+        dport = packet["UDP"].dport
+    else:
+        return "N/A"
+
+    local_port = None
+    if packet.haslayer(IP):
+        if packet[IP].src in local_ips:
+            local_port = sport
+        elif packet[IP].dst in local_ips:
+            local_port = dport
+
+    if not local_port:
+        return "N/A"
+
+    return port_cache.get_app_name(local_port)
+
+
+
+--- FILE: network/sniffer.py ---
+import time
+import logging
+import threading
+from scapy.layers.inet import IP, TCP, UDP, ICMP
+from scapy.layers.l2 import ARP
+from scapy.all import sniff
+import config
+from network.mapper import get_app_name
+
+
+def sniff_prn(packet):
+    try:
+        if packet.haslayer(IP):
+            src_ip = packet[IP].src
+            dst_ip = packet[IP].dst
+            proto = {6: "TCP", 17: "UDP"}.get(packet[IP].proto, "Other")
+        else:
+            src_ip = dst_ip = "N/A"
+            proto = "N/A"
+
+        if packet.haslayer(TCP):
+            port = packet[TCP].sport
+        elif packet.haslayer(UDP):
+            port = packet[UDP].sport
+        elif packet.haslayer(ICMP):
+            proto = "ICMP"
+            port = ""
+        elif packet.haslayer(ARP):
+            src_ip = packet[ARP].psrc
+            dst_ip = packet[ARP].pdst
+            proto = "ARP"
+            port = ""
+        else:
+            port = ""
+
+        app_name = get_app_name(packet)
+        line = (
+            f"[cyan]{time.strftime('%H:%M:%S')}[/cyan]  "
+            f"[green]{src_ip}[/green]  ->  [green]{dst_ip}[/green]  |  "
+            f"[yellow]{proto}[/yellow]  |  [red]Port: {port}[/red]  |  "
+            f"[plum4]App: {app_name}[/plum4]"
+        )
+
+        with config.sniff_lock:
+            config.sniffed_packets.append(line)
+            if len(config.sniffed_packets) > 30:
+                config.sniffed_packets.pop(0)
+    except Exception as e:
+        logging.error(f"Error in sniff_prn: {e}")
+
+
+def sniffer_thread_func():
+    while True:
+        if config.sniffing_active:
+            sniff(filter="ip or arp", prn=sniff_prn, store=False, timeout=0.5)
+        else:
+            time.sleep(0.5)
+
+
+def start_sniffer_thread():
+    sniffer_thread = threading.Thread(target=sniffer_thread_func, daemon=True)
+    sniffer_thread.start()
+
+
+
+--- FILE: security/__init__.py ---
+
+
+
+--- FILE: security/firewall.py ---
+import subprocess
+import logging
+from rich.prompt import Prompt
+
+from config import console
+from core.database import load_rules, save_rules
+from core.models import FirewallRule
+
+
+def run_powershell(command: str):
+    return subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            command,
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+
+def build_firewall_command(rule: FirewallRule, direction: str) -> str:
+    display_name = (
+        rule.inbound_firewall_name
+        if direction.lower() == "inbound"
+        else rule.outbound_firewall_name
+    )
+
+    cmd = [
+        "New-NetFirewallRule",
+        f'-DisplayName "{display_name}"',
+        f"-Direction {direction.capitalize()}",
+        f"-Action {rule.action.capitalize()}",
+    ]
+
+    if rule.app:
+        cmd.append(f'-Program "{rule.app}"')
+
+    if rule.dst_ip:
+        cmd.append(f'-RemoteAddress "{rule.dst_ip}"')
+
+    if rule.port:
+        cmd.append(f'-RemotePort "{rule.port}"')
+
+    if rule.protocol:
+        cmd.append(f'-Protocol "{rule.protocol}"')
+
+    return " ".join(cmd)
+
+
+def apply_firewall_rule(rule: FirewallRule):
+    directions = []
+
+    match rule.direction:
+        case "inbound":
+            directions.append("Inbound")
+        case "outbound":
+            directions.append("Outbound")
+        case "both":
+            directions.extend(["Inbound", "Outbound"])
+
+    for direction in directions:
+        cmd = build_firewall_command(rule, direction)
+        result = run_powershell(cmd)
+
+        if result.returncode != 0:
+            console.print(
+                f"[bold red][ERROR][/bold red] Failed to apply {direction} rule:\n{result.stderr}"
+            )
+            logging.error(
+                f"Failed applying {direction} rule for {rule.id}: {result.stderr}"
+            )
+            continue
+
+        console.print(
+            f"[bold green][INFO][/bold green] Applied {direction} rule for {rule.name}"
+        )
+        logging.info(f"Applied {direction} firewall rule {rule.id}")
+
+
+def remove_firewall_rule(rule: FirewallRule):
+    names = []
+
+    if rule.direction == "inbound":
+        names.append(rule.inbound_firewall_name)
+
+    elif rule.direction == "outbound":
+        names.append(rule.outbound_firewall_name)
+
+    else:
+        names.extend(
+            [
+                rule.inbound_firewall_name,
+                rule.outbound_firewall_name,
+            ]
+        )
+
+    for name in names:
+        cmd = f'Remove-NetFirewallRule -DisplayName "{name}"'
+        result = run_powershell(cmd)
+
+        if result.returncode == 0:
+            logging.info(f"Removed firewall rule {name}")
+        else:
+            logging.info(f"Firewall rule may not exist: {name}")
+
+
+def apply_firewall_rules():
+    rules = load_rules()
+    for rule in rules:
+        remove_firewall_rule(rule)
+    for rule in rules:
+        apply_firewall_rule(rule)
+    console.print("[bold green]All rules applied.[/bold green]")
+    logging.info("Applied all firewall rules")
+    Prompt.ask("Press Enter to exit")
+
+
+def clear_firewall_rules():
+    rules = load_rules()
+    for rule in rules:
+        remove_firewall_rule(rule)
+    save_rules([])
+    console.print("[bold green]All firewall rules cleared.[/bold green]")
+    logging.info("Cleared all firewall rules")
+    Prompt.ask("Press Enter to exit")
+
+
+
+--- FILE: ui/__init__.py ---
+
+
+
+--- FILE: ui/dashboard.py ---
+import sys
+import time
+import subprocess
+import msvcrt
+from rich.panel import Panel
+from rich.layout import Layout
+from rich.live import Live
+from rich.table import Table
+from rich import box
+from rich.align import Align
+from rich.text import Text
+
+import config
+from network.sniffer import start_sniffer_thread
+
+
+def generate_menu_table():
+    """Generates a sleek, borderless table for the main menu."""
+    table = Table(box=box.SIMPLE, expand=True, show_header=False)
+    table.add_column("Icon", justify="center", width=3)
+    table.add_column("Key", style="bold yellow", justify="right", width=3)
+    table.add_column("Action", style="bold white")
+
+    menu_items = [
+        ("1", "List Firewall Rules"),
+        ("2", "Add Firewall Rule"),
+        ("3", "Remove Firewall Rule"),
+        ("4", "Edit Firewall Rule"),
+        ("5", "Search / Filter Rules"),
+        ("6", "Apply Firewall Rules"),
+        ("7", "Clear All Rules"),
+        ("8", "Toggle Sniffer Status"),
+        ("0", "Exit Dashboard"),
+    ]
+
+    for key, action in menu_items:
+        table.add_row(f"[{key}]", action)
+
+    return table
+
+
+def get_formatted_logs():
+    """Reads and colorizes the firewall.log file."""
+    try:
+        with open("firewall.log", "r") as f:
+            log_lines = f.readlines()[-12:]  # Get last 12 lines
+    except Exception:
+        return Text("No logs available yet...", style="dim italic")
+
+    logs_text = Text()
+    for line in log_lines:
+        parts = line.strip().split(" ", 2)
+        if len(parts) == 3:
+            timestamp, level, message = parts
+            level = level.strip("[]")
+            color = {
+                "INFO": "bold green",
+                "WARNING": "bold yellow",
+                "ERROR": "bold red",
+            }.get(level, "white")
+            logs_text.append(f"{timestamp} ", style="cyan")
+            logs_text.append(f"[{level}] ", style=color)
+            logs_text.append(f"{message}\n")
+        else:
+            logs_text.append(f"{line}\n")
+    return logs_text
+
+
+def integrated_dashboard():
+    start_sniffer_thread()
+    exit_dashboard = False
+    last_command_time = 0
+
+    with Live(refresh_per_second=8, screen=True) as live:
+        while not exit_dashboard:
+            if msvcrt.kbhit():
+                ch = msvcrt.getch().decode("utf-8", errors="ignore").lower()
+                current_time = time.time()
+
+                if current_time - last_command_time >= 1:
+                    last_command_time = current_time
+                    if ch in {"1", "2", "3", "4", "5", "6", "7"}:
+                        cmd_map = {
+                            "1": ("--list", "List Rules"),
+                            "2": ("--add", "Add Rule"),
+                            "3": ("--remove", "Remove Rule"),
+                            "4": ("--edit", "Edit Rule"),
+                            "5": ("--search", "Search Rules"),
+                            "6": ("--apply", "Apply Rules"),
+                            "7": ("--clear", "Clear Rules"),
+                        }
+
+                        arg, title = cmd_map[ch]
+                        cmd = f'start "NetSentinel: {title}" cmd /c ""{sys.executable}" "{config.SCRIPT_PATH}" {arg}"'
+                        subprocess.Popen(cmd, shell=True)
+                    elif ch == "8":
+                        config.sniffing_active = not config.sniffing_active
+                    elif ch == "0":
+                        exit_dashboard = True
+
+            layout = Layout()
+
+            # Layout splits into Header, Main Body, and Footer
+            layout.split_column(
+                Layout(name="header", size=3),
+                Layout(name="body"),
+                Layout(name="footer", size=1),
+            )
+
+            # Main Body splits into Left (Menu/Logs) and Right (Sniffer)
+            layout["body"].split_row(
+                Layout(name="left_pane", ratio=2), Layout(name="right_pane", ratio=3)
+            )
+
+            # Left Pane splits into Menu and Logs
+            layout["left_pane"].split_column(
+                Layout(name="menu", size=14), Layout(name="logs")
+            )
+
+            # --- Panels ---
+
+            # 1. Header
+            header_text = Align.center(
+                "NETSENTINEL - Network Monitor & Windows Firewall Manager",
+                vertical="middle",
+            )
+            layout["header"].update(
+                Panel(header_text, style="on black", border_style="cyan")
+            )
+
+            # 2. Menu
+            menu_panel = Panel(
+                generate_menu_table(),
+                title="[bold white]Command Center[/bold white]",
+                border_style="bright_black",
+                padding=(1, 1),
+            )
+            layout["menu"].update(menu_panel)
+
+            # 3. Logs
+            logs_panel = Panel(
+                get_formatted_logs(),
+                title="[bold white]System Logs[/bold white]",
+                border_style="bright_blue",
+                padding=(0, 1),
+            )
+            layout["logs"].update(logs_panel)
+
+            # 4. Packet Sniffer
+            with config.sniff_lock:
+                packets_display = (
+                    "\n\n".join(config.sniffed_packets)
+                    if config.sniffed_packets
+                    else "[dim italic]Listening for network traffic...[/dim italic]"
+                )
+
+            sniffer_title = (
+                "[bold bright_green]Live Packet Sniffer [ACTIVE][/bold bright_green]"
+                if config.sniffing_active
+                else "[bold red]Live Packet Sniffer [PAUSED][/bold red]"
+            )
+            right_panel = Panel(
+                packets_display,
+                title=sniffer_title,
+                border_style="bright_green" if config.sniffing_active else "red",
+                padding=(1, 2),
+            )
+            layout["right_pane"].update(right_panel)
+
+            # 5. Footer
+            footer_text = Align.center(
+                "[dim white]Press the corresponding [bold yellow]number key[/bold yellow] to execute a command. Press [bold red]0[/bold red] to exit.[/dim white]"
+            )
+            layout["footer"].update(footer_text)
+
+            # Render
+            live.update(layout)
+            time.sleep(0.1)
+
+
+
+--- FILE: ui/prompts.py ---
+import logging
+
+from rich.table import Table
+from rich.prompt import Prompt
+
+from config import console
+from core.database import load_rules, save_rules
+from utils.validators import validate_ip, validate_port
+from network.mapper import get_full_app_path
+from security.firewall import remove_firewall_rule
+from core.models import FirewallRule
+
+
+def list_rules(filter_term=""):
+    rules = load_rules()
+    if filter_term:
+        filter_term = filter_term.lower()
+
+        rules = [
+            rule
+            for rule in rules
+            if filter_term in rule.name.lower()
+            or filter_term in (rule.app or "").lower()
+        ]
+    if not rules:
+        console.print("[bold red]No matching rules found.[/bold red]")
+        return
+
+    table = Table(title="Firewall Rules", header_style="bold cyan")
+    table.add_column("Index", style="magenta", justify="center")
+    table.add_column("Name", style="green")
+    table.add_column("Application", style="yellow")
+    table.add_column("Destination IP", style="blue")
+    table.add_column("Port", style="red")
+    table.add_column("Direction", style="cyan")
+    table.add_column("Action", style="bright_white")
+    table.add_column("Protocol", style="bright_blue")
+
+    for idx, rule in enumerate(rules):
+        table.add_row(
+            str(idx),
+            rule.name,
+            rule.app or "N/A",
+            rule.dst_ip or "N/A",
+            str(rule.port) if rule.port else "N/A",
+            rule.direction,
+            rule.action,
+            rule.protocol or "N/A",
+        )
+
+    console.print(table)
+
+
+def add_rule():
+    rule = FirewallRule.create(Prompt.ask("Enter rule name").strip())
+
+    app_input = Prompt.ask("Enter application name (Optional)", default="").strip()
+    if app_input:
+        rule.app = get_full_app_path(app_input)
+
+    dst_ip = Prompt.ask("Enter destination IP (Optional)", default="").strip()
+    if dst_ip:
+        if not validate_ip(dst_ip):
+            console.print("[bold red]Invalid IP address.[/bold red]")
+            return
+        rule.dst_ip = dst_ip
+
+    port = Prompt.ask("Enter port (Optional)", default="").strip()
+    if port:
+        if not (validate_port(port) and 1 <= int(port) <= 65535):
+            console.print("[bold red]Port must be between 1 and 65535.[/bold red]")
+            return
+        rule.port = int(port)
+
+    rule.direction = Prompt.ask(
+        "Enter direction (inbound/outbound/both)",
+        default="both"
+    ).strip().lower()
+
+    rule.action = Prompt.ask(
+        "Enter action (allow/block)",
+        default="block"
+    ).strip().lower()
+
+    protocol = Prompt.ask(
+        "Enter protocol (TCP/UDP)",
+        default=""
+    ).strip().upper()
+
+    if protocol:
+        if protocol not in {"TCP", "UDP"}:
+            console.print("[bold red]Protocol must be TCP or UDP.[/bold red]")
+            return
+        rule.protocol = protocol
+
+    rules = load_rules()
+    rules.append(rule)
+    save_rules(rules)
+
+    console.print("[bold green]Rule added successfully.[/bold green]")
+    logging.info(f"Added rule: {rule}")
+
+
+def remove_rule_interactive():
+    rules = load_rules()
+
+    if not rules:
+        console.print("[bold red]No rules to remove.[/bold red]")
+        return
+
+    list_rules()
+
+    try:
+        index = int(Prompt.ask("Enter the index of the rule to remove"))
+
+        if not 0 <= index < len(rules):
+            console.print("[bold red]Invalid index.[/bold red]")
+            return
+
+        removed_rule = rules.pop(index)
+
+        save_rules(rules)
+        remove_firewall_rule(removed_rule)
+
+        console.print(f"[bold green]Removed:[/bold green] {removed_rule.name}")
+        logging.info(f"Removed rule {removed_rule.id}")
+
+    except ValueError:
+        console.print("[bold red]Invalid input.[/bold red]")
+
+
+def edit_rule():
+    rules = load_rules()
+
+    if not rules:
+        console.print("[bold red]No matching rules found.[/bold red]")
+        Prompt.ask("[bold green]Press Enter to return[/bold green]")
+        return
+
+    list_rules()
+
+    try:
+        index = int(Prompt.ask("Enter the index of the rule to edit"))
+
+        if not 0 <= index < len(rules):
+            console.print("[bold red]Invalid index.[/bold red]")
+            return
+
+        rule = rules[index]
+
+        console.print(f"Editing: [bold yellow]{rule.name}[/bold yellow]")
+
+        rule.name = Prompt.ask("Rule name", default=rule.name).strip()
+
+        app_input = Prompt.ask(
+            "Enter application name (Optional)",
+            default=rule.app or ""
+        ).strip()
+        rule.app = get_full_app_path(app_input) if app_input else None
+
+        dst_ip = Prompt.ask(
+            "Destination IP",
+            default=rule.dst_ip or ""
+        ).strip()
+
+        if dst_ip:
+            if not validate_ip(dst_ip):
+                console.print("[bold red]Invalid IP address.[/bold red]")
+                return
+            rule.dst_ip = dst_ip
+        else:
+            rule.dst_ip = None
+
+        port = Prompt.ask(
+            "Port",
+            default=str(rule.port) if rule.port else ""
+        ).strip()
+
+        if port:
+            if not (validate_port(port) and 1 <= int(port) <= 65535):
+                console.print("[bold red]Invalid port.[/bold red]")
+                return
+            rule.port = int(port)
+        else:
+            rule.port = None
+
+        rule.direction = Prompt.ask(
+            "Direction",
+            default=rule.direction
+        ).strip().lower()
+
+        rule.action = Prompt.ask(
+            "Action",
+            default=rule.action
+        ).strip().lower()
+
+        protocol = Prompt.ask(
+            "Protocol",
+            default=rule.protocol or ""
+        ).strip().upper()
+
+        if protocol:
+            if protocol not in {"TCP", "UDP"}:
+                console.print("[bold red]Protocol must be TCP or UDP.[/bold red]")
+                return
+            rule.protocol = protocol
+        else:
+            rule.protocol = None
+
+        save_rules(rules)
+
+        console.print("[bold green]Rule updated successfully.[/bold green]")
+        logging.info(f"Updated rule {rule.id}")
+
+    except ValueError:
+        console.print("[bold red]Invalid input.[/bold red]")
+        logging.error("Non-integer input for rule editing")
+
+
+def search_filter_rules():
+    term = Prompt.ask("Enter search term (by rule name or application)", default="")
+    list_rules(filter_term=term)
+
+
+
+--- FILE: utils/__init__.py ---
+
+
+
+--- FILE: utils/admin.py ---
+import ctypes
+import logging
+
+def is_admin():
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except Exception as e:
+        logging.error(f"is_admin() exception: {e}")
+        return False
+
+
+
+--- FILE: utils/validators.py ---
+import ipaddress
+
+def validate_ip(ip_str):
+    try:
+        ipaddress.ip_address(ip_str)
+        return True
+    except ValueError:
+        return False
+
+def validate_port(port_str):
+    return port_str.isdigit()
+
+

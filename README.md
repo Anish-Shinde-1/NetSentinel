@@ -11,8 +11,10 @@ It provides an interactive dashboard to monitor live network packets and a comma
 - **Application-Layer Firewall Management**: Add, edit, remove, or search rules to block specific `.exe` applications, IPs, or ports using Windows Defender Firewall via PowerShell.
 - **Real-Time Packet Sniffing**: Uses `scapy` to monitor network traffic (TCP, UDP, ICMP, ARP) and dynamically maps inbound/outbound packets to running local processes.
 - **Interactive TUI Dashboard**: A polished `rich` based terminal interface that displays live system logs and a scrolling packet feed with hotkey navigation.
+-- **Firewall Rule Domain Model**: Firewall rules are represented by a dedicated FirewallRule dataclass, providing a consistent structure across the UI, persistence, and firewall layers.
 - **Decoupled Architecture**: Strictly separated modules for UI, Network, Security, and Core Data to prevent circular dependencies and ensure maintainability.
 - **Persistent State**: Firewall rules are saved and loaded dynamically from a local JSON database, ensuring protection persists across reboots.
+-- **Connection-Aware Process Mapping**: Uses a background connection cache to efficiently map captured packets to local processes without repeatedly scanning active connections.
 
 ## Requirements
 
@@ -65,9 +67,11 @@ netsentinel/
 ├── config.py           # Global state, logging setup, and thread locks
 │
 ├── core/                   
+│   ├── models.py       # FirewallRule domain model
 │   └── database.py     # JSON storage operations (load/save rules)
 │
-├── network/                
+├── network/        
+│   ├── cache.py        # Background port→process cache       
 │   ├── sniffer.py      # Background Scapy thread for packet capture
 │   └── mapper.py       # Maps network packets to local processes
 │
@@ -78,9 +82,14 @@ netsentinel/
 │   ├── dashboard.py    # The rich live terminal UI loop
 │   └── prompts.py      # Interactive input flows for rule management
 │
-└── utils/                  
-    ├── admin.py        # Windows privilege escalation checks
-    └── validators.py   # IP and Port validation logic
+├── utils/                  
+│   ├── admin.py        # Windows privilege escalation checks
+│   └── validators.py   # IP and Port validation logic
+│
+├── firewall.log        # Rule operation and application logs 
+└── rules.json          # Persistent firewall rule database
+
+
 ```
 
 ## Disclaimer

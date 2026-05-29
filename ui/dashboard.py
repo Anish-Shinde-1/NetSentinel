@@ -73,43 +73,41 @@ def integrated_dashboard():
 
     with Live(refresh_per_second=8, screen=True) as live:
         while not exit_dashboard:
-            # --- Input Handling ---
             if msvcrt.kbhit():
                 ch = msvcrt.getch().decode("utf-8", errors="ignore").lower()
                 current_time = time.time()
 
-                # Prevent spamming terminal windows
                 if current_time - last_command_time >= 1:
                     last_command_time = current_time
                     if ch in {"1", "2", "3", "4", "5", "6", "7"}:
                         cmd_map = {
-                            "1": "--list",
-                            "2": "--add",
-                            "3": "--remove",
-                            "4": "--edit",
-                            "5": "--search",
-                            "6": "--apply",
-                            "7": "--clear",
+                            "1": ("--list", "List Rules"),
+                            "2": ("--add", "Add Rule"),
+                            "3": ("--remove", "Remove Rule"),
+                            "4": ("--edit", "Edit Rule"),
+                            "5": ("--search", "Search Rules"),
+                            "6": ("--apply", "Apply Rules"),
+                            "7": ("--clear", "Clear Rules"),
                         }
 
-                        cmd = f'start cmd /c ""{sys.executable}" "{config.SCRIPT_PATH}" {cmd_map[ch]}"'
+                        arg, title = cmd_map[ch]
+                        cmd = f'start "NetSentinel: {title}" cmd /c ""{sys.executable}" "{config.SCRIPT_PATH}" {arg}"'
                         subprocess.Popen(cmd, shell=True)
                     elif ch == "8":
                         config.sniffing_active = not config.sniffing_active
                     elif ch == "0":
                         exit_dashboard = True
 
-            # --- Layout Construction ---
             layout = Layout()
 
-            # Root splits into Header, Main Body, and Footer
+            # Layout splits into Header, Main Body, and Footer
             layout.split_column(
                 Layout(name="header", size=3),
                 Layout(name="body"),
                 Layout(name="footer", size=1),
             )
 
-            # Body splits into Left (Menu/Logs) and Right (Sniffer)
+            # Main Body splits into Left (Menu/Logs) and Right (Sniffer)
             layout["body"].split_row(
                 Layout(name="left_pane", ratio=2), Layout(name="right_pane", ratio=3)
             )
@@ -119,11 +117,11 @@ def integrated_dashboard():
                 Layout(name="menu", size=14), Layout(name="logs")
             )
 
-            # --- Populate Panels ---
+            # --- Panels ---
 
             # 1. Header
             header_text = Align.center(
-                "NETSENTINEL - Network Monitor & Firewall Manager",
+                "NETSENTINEL - Network Monitor & Windows Firewall Manager",
                 vertical="middle",
             )
             layout["header"].update(

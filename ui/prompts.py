@@ -1,5 +1,4 @@
 import logging
-from typing import Dict, Any
 
 from rich.table import Table
 from rich.prompt import Prompt
@@ -9,16 +8,19 @@ from core.database import load_rules, save_rules
 from utils.validators import validate_ip, validate_port
 from network.mapper import get_full_app_path
 from security.firewall import remove_firewall_rule
+from core.models import FirewallRule
 
 
 def list_rules(filter_term=""):
     rules = load_rules()
     if filter_term:
+        filter_term = filter_term.lower()
+
         rules = [
-            r
-            for r in rules
-            if filter_term.lower() in r.get("name", "").lower()
-            or filter_term.lower() in r.get("app", "").lower()
+            rule
+            for rule in rules
+            if filter_term in rule.name.lower()
+            or filter_term in (rule.app or "").lower()
         ]
     if not rules:
         console.print("[bold red]No matching rules found.[/bold red]")
@@ -37,192 +39,179 @@ def list_rules(filter_term=""):
     for idx, rule in enumerate(rules):
         table.add_row(
             str(idx),
-            rule.get("name", "N/A"),
-            rule.get("app", "N/A"),
-            rule.get("dst_ip", "N/A"),
-            str(rule.get("port", "N/A")),
-            rule.get("direction", "N/A"),
-            rule.get("action", "N/A"),
-            rule.get("protocol", "N/A"),
+            rule.name,
+            rule.app or "N/A",
+            rule.dst_ip or "N/A",
+            str(rule.port) if rule.port else "N/A",
+            rule.direction,
+            rule.action,
+            rule.protocol or "N/A",
         )
+
     console.print(table)
 
 
 def add_rule():
-    # Explicitly typing the dict prevents Pylance from locking it to Dict[str, str]
-    rule: Dict[str, Any] = {}
-    rule["name"] = Prompt.ask("Enter rule name").strip()
+    rule = FirewallRule.create(Prompt.ask("Enter rule name").strip())
 
     app_input = Prompt.ask("Enter application name (Optional)", default="").strip()
     if app_input:
-        rule["app"] = get_full_app_path(app_input)
+        rule.app = get_full_app_path(app_input)
 
     dst_ip = Prompt.ask("Enter destination IP (Optional)", default="").strip()
     if dst_ip:
-        if validate_ip(dst_ip):
-            rule["dst_ip"] = dst_ip
-        else:
+        if not validate_ip(dst_ip):
             console.print("[bold red]Invalid IP address.[/bold red]")
-            logging.error("Attempted to add rule with invalid IP address")
             return
+        rule.dst_ip = dst_ip
 
-    port = Prompt.ask(
-        "Enter port (Optional, leave blank for all ports)", default=""
-    ).strip()
+    port = Prompt.ask("Enter port (Optional)", default="").strip()
     if port:
-        if validate_port(port) and 1 <= int(port) <= 65535:
-            rule["port"] = port
-        else:
-            console.print(
-                "[bold red]Port must be a number between 1 and 65535.[/bold red]"
-            )
-            logging.error("Attempted to add rule with invalid port")
+        if not (validate_port(port) and 1 <= int(port) <= 65535):
+            console.print("[bold red]Port must be between 1 and 65535.[/bold red]")
             return
+        rule.port = int(port)
 
-    rule["direction"] = (
-        Prompt.ask("Enter direction (inbound/outbound/both)", default="both")
-        .strip()
-        .lower()
-    )
-    rule["action"] = (
-        Prompt.ask("Enter action (allow/block)", default="block").strip().lower()
-    )
+    rule.direction = Prompt.ask(
+        "Enter direction (inbound/outbound/both)",
+        default="both"
+    ).strip().lower()
 
-    protocol = (
-        Prompt.ask("Enter protocol (TCP/UDP, leave blank for all)", default="")
-        .strip()
-        .upper()
-    )
-    if protocol in ["TCP", "UDP"]:
-        rule["protocol"] = protocol
-    elif protocol:
-        console.print("[bold red]Protocol must be TCP or UDP.[/bold red]")
-        logging.error("Attempted to add rule with invalid protocol")
-        return
+    rule.action = Prompt.ask(
+        "Enter action (allow/block)",
+        default="block"
+    ).strip().lower()
 
-    rule["enabled"] = True
+    protocol = Prompt.ask(
+        "Enter protocol (TCP/UDP)",
+        default=""
+    ).strip().upper()
+
+    if protocol:
+        if protocol not in {"TCP", "UDP"}:
+            console.print("[bold red]Protocol must be TCP or UDP.[/bold red]")
+            return
+        rule.protocol = protocol
 
     rules = load_rules()
     rules.append(rule)
     save_rules(rules)
+
     console.print("[bold green]Rule added successfully.[/bold green]")
     logging.info(f"Added rule: {rule}")
 
 
 def remove_rule_interactive():
     rules = load_rules()
+
     if not rules:
         console.print("[bold red]No rules to remove.[/bold red]")
         return
+
     list_rules()
+
     try:
         index = int(Prompt.ask("Enter the index of the rule to remove"))
-        if 0 <= index < len(rules):
-            removed_rule = rules.pop(index)
-            save_rules(rules)
-            console.print(f"[bold green]Removed rule:[/bold green] {removed_rule}")
-            logging.info(f"Removed rule: {removed_rule}")
-            remove_firewall_rule(removed_rule)
-        else:
+
+        if not 0 <= index < len(rules):
             console.print("[bold red]Invalid index.[/bold red]")
+            return
+
+        removed_rule = rules.pop(index)
+
+        save_rules(rules)
+        remove_firewall_rule(removed_rule)
+
+        console.print(f"[bold green]Removed:[/bold green] {removed_rule.name}")
+        logging.info(f"Removed rule {removed_rule.id}")
+
     except ValueError:
         console.print("[bold red]Invalid input.[/bold red]")
-        logging.error("Non-integer input for rule removal")
 
 
 def edit_rule():
     rules = load_rules()
+
     if not rules:
         console.print("[bold red]No matching rules found.[/bold red]")
         Prompt.ask("[bold green]Press Enter to return[/bold green]")
         return
 
     list_rules()
+
     try:
         index = int(Prompt.ask("Enter the index of the rule to edit"))
-        if 0 <= index < len(rules):
-            rule = rules[index]
-            console.print(
-                f"Editing rule: [bold yellow]{rule.get('name', 'N/A')}[/bold yellow]"
-            )
 
-            rule["name"] = Prompt.ask(
-                "Enter rule name", default=rule.get("name", "")
-            ).strip()
+        if not 0 <= index < len(rules):
+            console.print("[bold red]Invalid index.[/bold red]")
+            return
 
-            app_input = Prompt.ask(
-                "Enter application name (Optional)", default=rule.get("app", "")
-            ).strip()
-            if app_input:
-                rule["app"] = get_full_app_path(app_input)
-            else:
-                rule.pop("app", None)
+        rule = rules[index]
 
-            dst_ip = Prompt.ask(
-                "Enter destination IP (Optional)", default=rule.get("dst_ip", "")
-            ).strip()
-            if dst_ip:
-                if validate_ip(dst_ip):
-                    rule["dst_ip"] = dst_ip
-                else:
-                    console.print("[bold red]Invalid IP address.[/bold red]")
-                    return
-            else:
-                rule.pop("dst_ip", None)
+        console.print(f"Editing: [bold yellow]{rule.name}[/bold yellow]")
 
-            port = Prompt.ask(
-                "Enter port (Optional, leave blank for all ports)",
-                default=str(rule.get("port", "")),
-            ).strip()
-            if port:
-                if validate_port(port) and 1 <= int(port) <= 65535:
-                    rule["port"] = port
-                else:
-                    console.print(
-                        "[bold red]Port must be a number between 1 and 65535.[/bold red]"
-                    )
-                    return
-            else:
-                rule.pop("port", None)
+        rule.name = Prompt.ask("Rule name", default=rule.name).strip()
 
-            rule["direction"] = (
-                Prompt.ask(
-                    "Enter direction (inbound/outbound/both)",
-                    default=rule.get("direction", "both"),
-                )
-                .strip()
-                .lower()
-            )
-            rule["action"] = (
-                Prompt.ask(
-                    "Enter action (allow/block)", default=rule.get("action", "block")
-                )
-                .strip()
-                .lower()
-            )
+        app_input = Prompt.ask(
+            "Enter application name (Optional)",
+            default=rule.app or ""
+        ).strip()
+        rule.app = get_full_app_path(app_input) if app_input else None
 
-            protocol = (
-                Prompt.ask(
-                    "Enter protocol (TCP/UDP, leave blank for all)",
-                    default=rule.get("protocol", ""),
-                )
-                .strip()
-                .upper()
-            )
-            if protocol in ["TCP", "UDP"]:
-                rule["protocol"] = protocol
-            elif protocol:
+        dst_ip = Prompt.ask(
+            "Destination IP",
+            default=rule.dst_ip or ""
+        ).strip()
+
+        if dst_ip:
+            if not validate_ip(dst_ip):
+                console.print("[bold red]Invalid IP address.[/bold red]")
+                return
+            rule.dst_ip = dst_ip
+        else:
+            rule.dst_ip = None
+
+        port = Prompt.ask(
+            "Port",
+            default=str(rule.port) if rule.port else ""
+        ).strip()
+
+        if port:
+            if not (validate_port(port) and 1 <= int(port) <= 65535):
+                console.print("[bold red]Invalid port.[/bold red]")
+                return
+            rule.port = int(port)
+        else:
+            rule.port = None
+
+        rule.direction = Prompt.ask(
+            "Direction",
+            default=rule.direction
+        ).strip().lower()
+
+        rule.action = Prompt.ask(
+            "Action",
+            default=rule.action
+        ).strip().lower()
+
+        protocol = Prompt.ask(
+            "Protocol",
+            default=rule.protocol or ""
+        ).strip().upper()
+
+        if protocol:
+            if protocol not in {"TCP", "UDP"}:
                 console.print("[bold red]Protocol must be TCP or UDP.[/bold red]")
                 return
-            else:
-                rule.pop("protocol", None)
-
-            rules[index] = rule
-            save_rules(rules)
-            console.print("[bold green]Rule updated successfully.[/bold green]")
-            logging.info(f"Updated rule: {rule}")
+            rule.protocol = protocol
         else:
-            console.print("[bold red]Invalid index.[/bold red]")
+            rule.protocol = None
+
+        save_rules(rules)
+
+        console.print("[bold green]Rule updated successfully.[/bold green]")
+        logging.info(f"Updated rule {rule.id}")
+
     except ValueError:
         console.print("[bold red]Invalid input.[/bold red]")
         logging.error("Non-integer input for rule editing")

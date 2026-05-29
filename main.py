@@ -13,6 +13,7 @@ from ui.prompts import (
     search_filter_rules,
 )
 from security.firewall import apply_firewall_rules, clear_firewall_rules
+from network.cache import port_cache
 
 
 def run_sniffer():
@@ -38,6 +39,8 @@ def main():
     if not is_admin():
         console.print("[bold red]ERROR: Requires administrator privileges[/bold red]")
         sys.exit(1)
+
+    port_cache.start()
 
     parser = argparse.ArgumentParser(
         description="NetSentinel v1.0 - Network Monitor & Firewall Manager"

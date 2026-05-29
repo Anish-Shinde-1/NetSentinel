@@ -4,137 +4,108 @@ from rich.prompt import Prompt
 
 from config import console
 from core.database import load_rules, save_rules
+from core.models import FirewallRule
 
 
-def apply_firewall_rule(rule):
-    logging.info(f"Applying rule: {rule}")
-
-    app_path = rule.get("app", "").replace("\\\\", "\\") if "app" in rule else None
-    protocol = rule.get("protocol", "TCP").upper() if rule.get("protocol") else None
-    direction = rule.get("direction", "both").lower()
-
-    if direction == "inbound":
-        ps_direction = "Inbound"
-    elif direction == "outbound":
-        ps_direction = "Outbound"
-    else:
-        ps_direction = "Outbound"
-
-    cmd = None
-    display_name = None
-
-    if "app" in rule and "dst_ip" in rule and "port" in rule and protocol:
-        display_name = f"Block {app_path} on {rule['dst_ip']}:{rule['port']}"
-        cmd = (
-            f'New-NetFirewallRule -DisplayName "{display_name}" '
-            f'-Direction {ps_direction} -Program "{app_path}" -RemoteAddress {rule["dst_ip"]} '
-            f'-Protocol {protocol} -RemotePort {rule["port"]} -Action Block'
-        )
-    elif "app" in rule and "dst_ip" in rule:
-        display_name = f"Block {app_path} on {rule['dst_ip']}"
-        cmd = (
-            f'New-NetFirewallRule -DisplayName "{display_name}" '
-            f'-Direction {ps_direction} -Program "{app_path}" -RemoteAddress {rule["dst_ip"]} -Action Block'
-        )
-    elif "dst_ip" in rule and "port" in rule and protocol:
-        display_name = f"Block IP {rule['dst_ip']}:{rule['port']}"
-        cmd = (
-            f'New-NetFirewallRule -DisplayName "{display_name}" '
-            f'-Direction {ps_direction} -RemoteAddress {rule["dst_ip"]} '
-            f'-Protocol {protocol} -RemotePort {rule["port"]} -Action Block'
-        )
-    elif "app" in rule and "port" in rule and protocol:
-        display_name = f"Block {app_path} on Port {rule['port']}"
-        cmd = (
-            f'New-NetFirewallRule -DisplayName "{display_name}" '
-            f'-Direction {ps_direction} -Program "{app_path}" '
-            f'-Protocol {protocol} -RemotePort {rule["port"]} -Action Block'
-        )
-    elif "app" in rule:
-        display_name = f"Block {app_path}"
-        cmd = (
-            f'New-NetFirewallRule -DisplayName "{display_name}" '
-            f'-Direction {ps_direction} -Program "{app_path}" -Action Block'
-        )
-    elif "dst_ip" in rule:
-        display_name = f"Block IP {rule['dst_ip']}"
-        cmd = (
-            f'New-NetFirewallRule -DisplayName "{display_name}" '
-            f'-Direction {ps_direction} -RemoteAddress {rule["dst_ip"]} -Action Block'
-        )
-    elif "port" in rule and protocol:
-        display_name = f"Block Port {rule['port']}"
-        cmd = (
-            f'New-NetFirewallRule -DisplayName "{display_name}" '
-            f'-Direction {ps_direction} -Protocol {protocol} -RemotePort {rule["port"]} -Action Block'
-        )
-
-    if cmd:
-        result = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            console.print(f"[bold red][ERROR][/bold red] Failed to apply rule: {result.stderr}")
-            logging.error(f"Failed to apply rule: {cmd}. Error: {result.stderr}")
-        else:
-            console.print(f"[bold green][INFO][/bold green] Rule applied successfully: {display_name}")
-            logging.info(f"Applied rule: {cmd}")
-
-    if rule.get("direction", "both").lower() == "both" and cmd:
-        extra_direction = "Inbound" if ps_direction == "Outbound" else "Outbound"
-        extra_cmd = cmd.replace(f"-Direction {ps_direction}", f"-Direction {extra_direction}")
-        result = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", extra_cmd],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            console.print(f"[bold red][ERROR][/bold red] Failed to apply {extra_direction} rule: {result.stderr}")
-            logging.error(f"Failed to apply {extra_direction} rule: {extra_cmd}. Error: {result.stderr}")
-        else:
-            console.print(f"[bold green][INFO][/bold green] {extra_direction} rule applied successfully: {display_name}")
-            logging.info(f"Applied additional rule for {extra_direction}: {extra_cmd}")
-
-
-def remove_firewall_rule(rule):
-    logging.info(f"Removing rule: {rule}")
-
-    app_path = rule.get("app", "") if "app" in rule else None
-    port = rule.get("port", "")
-    cmd = None
-
-    if "app" in rule and "dst_ip" in rule and port:
-        cmd = f'Remove-NetFirewallRule -DisplayName "Block {app_path} on {rule["dst_ip"]}:{port}"'
-    elif "app" in rule and "dst_ip" in rule:
-        cmd = f'Remove-NetFirewallRule -DisplayName "Block {app_path} on {rule["dst_ip"]}"'
-    elif "dst_ip" in rule and port:
-        cmd = f'Remove-NetFirewallRule -DisplayName "Block IP {rule["dst_ip"]}:{port}"'
-    elif "app" in rule and port:
-        cmd = f'Remove-NetFirewallRule -DisplayName "Block {app_path} on Port {port}"'
-    elif "app" in rule:
-        cmd = f'Remove-NetFirewallRule -DisplayName "Block {app_path}"'
-    elif "dst_ip" in rule:
-        cmd = f'Remove-NetFirewallRule -DisplayName "Block IP {rule["dst_ip"]}"'
-    elif port:
-        cmd = f'Remove-NetFirewallRule -DisplayName "Block Port {port}"'
-
-    if not cmd:
-        console.print("[bold yellow][WARNING][/bold yellow] No valid rule to remove.")
-        logging.warning("No valid rule to remove.")
-        return
-
-    result = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd],
+def run_powershell(command: str):
+    return subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            command,
+        ],
         capture_output=True,
         text=True,
     )
-    if result.returncode != 0:
-        logging.info(f"Rule removal attempted, may not exist: {cmd}")
+
+
+def build_firewall_command(rule: FirewallRule, direction: str) -> str:
+    display_name = (
+        rule.inbound_firewall_name
+        if direction.lower() == "inbound"
+        else rule.outbound_firewall_name
+    )
+
+    cmd = [
+        "New-NetFirewallRule",
+        f'-DisplayName "{display_name}"',
+        f"-Direction {direction.capitalize()}",
+        f"-Action {rule.action.capitalize()}",
+    ]
+
+    if rule.app:
+        cmd.append(f'-Program "{rule.app}"')
+
+    if rule.dst_ip:
+        cmd.append(f'-RemoteAddress "{rule.dst_ip}"')
+
+    if rule.port:
+        cmd.append(f'-RemotePort "{rule.port}"')
+
+    if rule.protocol:
+        cmd.append(f'-Protocol "{rule.protocol}"')
+
+    return " ".join(cmd)
+
+
+def apply_firewall_rule(rule: FirewallRule):
+    directions = []
+
+    match rule.direction:
+        case "inbound":
+            directions.append("Inbound")
+        case "outbound":
+            directions.append("Outbound")
+        case "both":
+            directions.extend(["Inbound", "Outbound"])
+
+    for direction in directions:
+        cmd = build_firewall_command(rule, direction)
+        result = run_powershell(cmd)
+
+        if result.returncode != 0:
+            console.print(
+                f"[bold red][ERROR][/bold red] Failed to apply {direction} rule:\n{result.stderr}"
+            )
+            logging.error(
+                f"Failed applying {direction} rule for {rule.id}: {result.stderr}"
+            )
+            continue
+
+        console.print(
+            f"[bold green][INFO][/bold green] Applied {direction} rule for {rule.name}"
+        )
+        logging.info(f"Applied {direction} firewall rule {rule.id}")
+
+
+def remove_firewall_rule(rule: FirewallRule):
+    names = []
+
+    if rule.direction == "inbound":
+        names.append(rule.inbound_firewall_name)
+
+    elif rule.direction == "outbound":
+        names.append(rule.outbound_firewall_name)
+
     else:
-        console.print("[bold green]Rule removed successfully.[/bold green]")
-        logging.info(f"Removed firewall rule: {cmd}")
+        names.extend(
+            [
+                rule.inbound_firewall_name,
+                rule.outbound_firewall_name,
+            ]
+        )
+
+    for name in names:
+        cmd = f'Remove-NetFirewallRule -DisplayName "{name}"'
+        result = run_powershell(cmd)
+
+        if result.returncode == 0:
+            logging.info(f"Removed firewall rule {name}")
+        else:
+            logging.info(f"Firewall rule may not exist: {name}")
 
 
 def apply_firewall_rules():

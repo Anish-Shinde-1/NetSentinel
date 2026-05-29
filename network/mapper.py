@@ -1,8 +1,8 @@
 import subprocess
 import socket
-import psutil
 from scapy.layers.inet import IP
 from config import console
+from network.cache import port_cache
 
 
 def get_full_app_path(app_name):
@@ -26,9 +26,12 @@ def get_full_app_path(app_name):
     return app_name
 
 
-def get_app_name(packet):
-    app_name = "N/A"
-    local_ips = socket.gethostbyname_ex(socket.gethostname())[2]
+def get_app_name(packet) -> str:
+    """Instantly resolves the app name using the O(1) cache."""
+    try:
+        local_ips = socket.gethostbyname_ex(socket.gethostname())[2]
+    except Exception:
+        local_ips = []
 
     if packet.haslayer("TCP"):
         sport = packet["TCP"].sport
@@ -37,25 +40,16 @@ def get_app_name(packet):
         sport = packet["UDP"].sport
         dport = packet["UDP"].dport
     else:
-        return app_name
+        return "N/A"
 
     local_port = None
-    if packet.haslayer(IP):  # <--- Add this safety check
+    if packet.haslayer(IP):
         if packet[IP].src in local_ips:
             local_port = sport
         elif packet[IP].dst in local_ips:
             local_port = dport
 
     if not local_port:
-        return app_name
+        return "N/A"
 
-    for conn in psutil.net_connections(kind="inet"):
-        try:
-            if conn.laddr and conn.laddr.port == local_port:
-                if conn.pid:
-                    proc = psutil.Process(conn.pid)
-                    app_name = proc.name()
-                    break
-        except (psutil.AccessDenied, psutil.NoSuchProcess):
-            continue
-    return app_name
+    return port_cache.get_app_name(local_port)
